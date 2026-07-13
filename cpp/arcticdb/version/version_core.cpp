@@ -1842,7 +1842,8 @@ void copy_frame_data_to_buffer(
             dst_column.type(),
             destination.field(target_index).name()
     );
-    if (auto handler = get_type_handler(read_options.output_format(), src_column.type(), dst_column.type()); handler) {
+    auto output_format_for_column = read_options.output_format_for_column_type(dst_column.type());
+    if (auto handler = get_type_handler(output_format_for_column, src_column.type(), dst_column.type()); handler) {
         const auto type_size = data_type_size(dst_column.type());
         const ColumnMapping mapping{
                 src_column.type(),
@@ -1868,7 +1869,7 @@ void copy_frame_data_to_buffer(
                     offset,
                     num_rows,
                     dst_rawtype_size,
-                    read_options.output_format(),
+                    output_format_for_column,
                     std::nullopt,
                     default_value
             );
@@ -1887,7 +1888,7 @@ void copy_frame_data_to_buffer(
                         offset,
                         num_rows,
                         dst_rawtype_size,
-                        read_options.output_format(),
+                        output_format_for_column,
                         src_column.opt_sparse_map(),
                         default_value
                 );
@@ -1918,7 +1919,7 @@ void copy_frame_data_to_buffer(
                             offset,
                             num_rows,
                             dst_rawtype_size,
-                            read_options.output_format(),
+                            output_format_for_column,
                             src_column.opt_sparse_map(),
                             default_value
                     );
@@ -1964,7 +1965,7 @@ void copy_frame_data_to_buffer(
                                     offset,
                                     num_rows,
                                     dst_rawtype_size,
-                                    read_options.output_format(),
+                                    output_format_for_column,
                                     src_column.opt_sparse_map(),
                                     default_value
                             );
