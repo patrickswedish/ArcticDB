@@ -330,6 +330,70 @@ class TestTimezoneIsOverwritten:
         action(lib, sym, series2)
         assert lib.read(sym).data.index.tz == series2.index.tz
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Monday 12029540807: the timezone should be cleared on mismatch, not overwritten. Remove this and "
+        "the overwrite assertions above together.",
+    )
+    @pytest.mark.parametrize("frame_type", ["dataframe", "series"])
+    def test_mismatched_index_timezone_is_cleared(self, in_memory_store_factory, action, frame_type):
+        # Neither timezone describes the combined data, so the result should be timezone-naive.
+        lib = in_memory_store_factory()
+        sym = "test_mismatched_index_timezone_is_cleared"
+        index_1 = pd.date_range(pd.Timestamp("2025-01-01"), periods=1, tz="America/New_York")
+        index_2 = pd.date_range(pd.Timestamp("2025-01-02"), periods=1, tz="Europe/London")
+        if frame_type == "dataframe":
+            first, second = pd.DataFrame({"value": [1]}, index=index_1), pd.DataFrame({"value": [2]}, index=index_2)
+        else:
+            first, second = pd.Series([1], index=index_1), pd.Series([2], index=index_2)
+        lib.write(sym, first)
+        action(lib, sym, second)
+        assert lib.read(sym).data.index.tz is None
+
+    def test_matching_index_timezone_is_preserved(self, in_memory_store_factory, action):
+        # The companion to the above: a shared timezone must survive.
+        lib = in_memory_store_factory()
+        sym = "test_matching_index_timezone_is_preserved"
+        first = pd.DataFrame({"value": [1]}, index=pd.date_range("2025-01-01", periods=1, tz="Europe/London"))
+        second = pd.DataFrame({"value": [2]}, index=pd.date_range("2025-01-02", periods=1, tz="Europe/London"))
+        lib.write(sym, first)
+        action(lib, sym, second)
+        assert str(lib.read(sym).data.index.tz) == "Europe/London"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Monday 12029540807: a mismatched multi-index level timezone should be cleared, not overwritten. "
+        "Remove this and the overwrite assertions below together.",
+    )
+    @pytest.mark.parametrize("frame_type", ["dataframe", "series"])
+    def test_mismatched_multiindex_level_timezone_is_cleared(self, in_memory_store_factory, action, frame_type):
+        lib = in_memory_store_factory()
+        sym = "multiindex_with_different_index_timezone"
+        index_1 = pd.MultiIndex.from_tuples([(pd.Timestamp(0, tz="America/New_York"), 1)], names=["date", "value"])
+        index_2 = pd.MultiIndex.from_tuples([(pd.Timestamp(1, tz="Europe/London"), 2)], names=["date", "value"])
+        if frame_type == "dataframe":
+            first, second = pd.DataFrame({"a": [1]}, index=index_1), pd.DataFrame({"a": [2]}, index=index_2)
+        else:
+            first, second = pd.Series([1], index=index_1), pd.Series([2], index=index_2)
+        lib.write(sym, first)
+        action(lib, sym, second)
+        assert lib.read(sym).data.index.levels[0].tz is None
+
+    def test_matching_multiindex_level_timezone_is_preserved(self, in_memory_store_factory, action):
+        lib = in_memory_store_factory()
+        sym = "multiindex_with_matching_index_timezone"
+        first = pd.DataFrame(
+            {"a": [1]},
+            index=pd.MultiIndex.from_tuples([(pd.Timestamp(0, tz="Europe/London"), 1)], names=["date", "value"]),
+        )
+        second = pd.DataFrame(
+            {"a": [2]},
+            index=pd.MultiIndex.from_tuples([(pd.Timestamp(1, tz="Europe/London"), 2)], names=["date", "value"]),
+        )
+        lib.write(sym, first)
+        action(lib, sym, second)
+        assert str(lib.read(sym).data.index.levels[0].tz) == "Europe/London"
+
     def test_dataframe_multiindex_with_different_index_timezone(self, in_memory_store_factory, action):
         lib = in_memory_store_factory()
         sym = "multiindex_with_different_index_timezone"
