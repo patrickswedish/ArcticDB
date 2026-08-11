@@ -974,7 +974,7 @@ def test_update_mismatched_object_kind(to_write, to_update, lmdb_version_store_d
     else:
         with pytest.raises(NormalizationException) as e:
             lib.update("sym", to_update)
-        assert "Update" in str(e.value)
+        assert "update" in str(e.value)
 
 
 def test_update_series_with_different_column_name_throws(lmdb_version_store_dynamic_schema_v1):

@@ -1,15 +1,11 @@
 #pragma once
 
 #include <arcticdb/pipeline/input_frame.hpp>
+#include <arcticdb/processing/schema_combine.hpp>
 #include <arcticdb/python/normalization_utils.hpp>
 #include <arcticdb/entity/timeseries_descriptor.hpp>
 
 namespace arcticdb {
-
-enum NormalizationOperation : uint8_t {
-    APPEND,
-    UPDATE,
-};
 
 struct StreamDescriptorMismatch : ArcticSpecificException<ErrorCode::E_DESCRIPTOR_MISMATCH> {
     StreamDescriptorMismatch(
@@ -25,8 +21,11 @@ bool columns_match(
         const bool convert_int_to_float = false
 );
 
-void fix_descriptor_mismatch_or_throw(
+/// The checks and the schema merge for append and update, in one place: raises if the new frame cannot be combined
+/// with the existing symbol, and otherwise returns the schema the combined data will have. Callers keep the
+/// operational guards - pickled, sortedness, index contiguity - and the row counts, which this knows nothing about.
+entity::OutputSchema combine_schema_with_frame(
         NormalizationOperation operation, bool dynamic_schema, const TimeseriesDescriptor& existing_tsd,
-        const pipelines::InputFrame& new_frame, bool empty_types
+        const pipelines::InputFrame& new_frame
 );
 } // namespace arcticdb

@@ -403,7 +403,7 @@ class TestAppend:
         symbol = "test_append_pickled_symbol"
         lmdb_version_store.write(symbol, np.arange(100).tolist())
         assert lmdb_version_store.is_symbol_pickled(symbol)
-        with pytest.raises(InternalException):
+        with pytest.raises(NormalizationException):
             _ = lmdb_version_store.append(symbol, np.arange(100).tolist(), compact_data=compact_data)
 
     @pytest.mark.parametrize("pickled_first", [True, False])
@@ -412,10 +412,7 @@ class TestAppend:
         pickled = np.arange(100).tolist()
         df = pd.DataFrame({"col": np.arange(2, dtype=np.int64)})
         lmdb_version_store.write(symbol, pickled if pickled_first else df)
-        # Appending to a pickled symbol is caught by a separate runtime check, so only the reverse order is
-        # reported as the object-kind mismatch it is.
-        expected = InternalException if pickled_first else NormalizationException
-        with pytest.raises(expected):
+        with pytest.raises(NormalizationException):
             lmdb_version_store.append(symbol, df if pickled_first else pickled, compact_data=compact_data)
 
     @pytest.mark.parametrize("mismatch", ["step", "start"])
@@ -804,7 +801,7 @@ class TestAppend:
         lib.write("sym", to_write)
         with pytest.raises(NormalizationException) as e:
             lib.append("sym", to_append, compact_data=compact_data)
-        assert "Append" in str(e.value)
+        assert "append" in str(e.value)
 
     @pytest.mark.parametrize(
         "to_write, to_append",
@@ -835,28 +832,7 @@ class TestAppend:
             lib.append("sym", to_append, compact_data=compact_data)
         assert "name_1" in str(e.value) and "name_2" in str(e.value)
 
-    def test_append_series_with_different_row_range_index_name(
-        self, lmdb_version_store_dynamic_schema_v1, compact_data
-    ):
-        lib = lmdb_version_store_dynamic_schema_v1
-        to_write = pd.Series([1, 2, 3])
-        to_write.index.name = "index_name_1"
-        to_append = pd.Series([4, 5, 6])
-        to_append.index.name = "index_name_2"
-        lib.write("sym", to_write)
-        lib.append("sym", to_append, compact_data=compact_data)
-        # The current behavior is the last modification operation is setting the index name.
-        # See Monday 9797097831, it would be best to require that index names are always matching. This is the case for
-        # datetime index because it's a physical column. It's a potentially breaking change.
-        assert lib.read("sym").data.index.name == "index_name_2"
-
     @pytest.mark.parametrize("frame_type", ["series", "dataframe"])
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Monday 9797097831: a RangeIndex name is held only in the metadata, so a mismatch goes unnoticed "
-        "and the last write wins, unlike every other index name. Remove this and the last-write-wins assertion in "
-        "test_append_series_with_different_row_range_index_name together.",
-    )
     def test_append_with_different_row_range_index_name_raises(
         self, lmdb_version_store_dynamic_schema_v1, compact_data, frame_type
     ):

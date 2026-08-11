@@ -70,9 +70,13 @@ folly::Future<entity::AtomKey> write_frame(
         bool allow_sparse = false
 );
 
+// combined_schema is what the appended-to symbol will look like, as established by combine_schema_with_frame. It is
+// passed in rather than derived here because producing it is also the compatibility check, which has to have run
+// before this point - it must not be possible to write data keys and only then discover the schemas do not combine.
 folly::Future<entity::AtomKey> append_frame(
         IndexPartialKey&& key, const std::shared_ptr<InputFrame>& frame, const SlicingPolicy& slicing,
-        index::IndexSegmentReader& index_segment_reader, const std::shared_ptr<Store>& store, bool dynamic_schema
+        index::IndexSegmentReader& index_segment_reader, const std::shared_ptr<Store>& store,
+        entity::OutputSchema&& combined_schema
 );
 
 enum class AffectedSegmentPart { START, END };

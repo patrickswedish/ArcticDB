@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 
 from arcticdb import QueryBuilder
-from arcticdb_ext.exceptions import InternalException
+from arcticdb_ext.exceptions import NormalizationException
 from arcticdb.version_store._common import TimeFrame
 from arcticdb.util.test import assert_frame_equal, assert_series_equal
 
@@ -195,19 +195,14 @@ def test_append_empty_dataframe_does_not_add_its_columns(lmdb_version_store_dyna
 def test_append_rowcount_series_onto_non_empty_timeseries_series(lmdb_version_store_dynamic_schema, sym):
     lib = lmdb_version_store_dynamic_schema
     lib.write(sym, pd.Series([1.0, 2.0], index=pd.date_range("2025-01-01", periods=2)))
-    # This should raise a NormalizationException. Currently this slips through the normalization check in schema_checks:125 incorrectly
-    # In the follow up commits which unify schema operations this will be changed to a normalization exception.
-    with pytest.raises(InternalException):
+    # A RowCount-indexed Series cannot be appended to a timeseries one; the exception is only for appending to an
+    # *empty* Series, which pandas 2 stores with a DatetimeIndex regardless.
+    with pytest.raises(NormalizationException):
         lib.append(sym, pd.Series([3.0, 4.0]))
 
 
 @pytest.mark.parametrize("join", ["outer", "inner"])
 @pytest.mark.parametrize("empty_first", [True, False])
-@pytest.mark.xfail(
-    strict=True,
-    reason="Concat rejects an empty index combined with a non-empty one where append accepts it. Concat should "
-    "be at least as permissive.",
-)
 def test_concat_empty_index_with_timeseries_index(lmdb_version_store_empty_types_dynamic_schema_v1, join, empty_first):
     lib = lmdb_version_store_empty_types_dynamic_schema_v1
     expected = pd.DataFrame({"a": [1.0, 2.0]}, index=pd.date_range("2025-01-01", periods=2))

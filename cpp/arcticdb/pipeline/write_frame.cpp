@@ -502,12 +502,13 @@ folly::Future<entity::AtomKey> write_frame(
 
 folly::Future<AtomKey> append_frame(
         IndexPartialKey&& key, const std::shared_ptr<InputFrame>& frame, const SlicingPolicy& slicing,
-        index::IndexSegmentReader& index_segment_reader, const std::shared_ptr<Store>& store, bool dynamic_schema
+        index::IndexSegmentReader& index_segment_reader, const std::shared_ptr<Store>& store,
+        entity::OutputSchema&& combined_schema
 ) {
     ARCTICDB_SAMPLE_DEFAULT(AppendFrame)
     auto existing_slices = unfiltered_index(index_segment_reader);
-    const auto tsd =
-            index::get_merged_tsd(frame->num_rows + frame->offset, dynamic_schema, index_segment_reader.tsd(), frame);
+
+    const auto tsd = tsd_from_schema(std::move(combined_schema), frame->num_rows + frame->offset, *frame);
     auto keys_fut = slice_and_write(frame, slicing, IndexPartialKey{key}, store);
     return std::move(keys_fut).thenValue([tsd = std::move(tsd),
                                           slices_to_write = std::move(existing_slices),

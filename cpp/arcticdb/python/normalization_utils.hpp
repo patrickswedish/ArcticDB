@@ -23,20 +23,14 @@ namespace pipelines {
 struct InputFrame;
 } // namespace pipelines
 
-/**
- * The new frame for append/update is compatible with the existing index. Throws various exceptions if not.
- */
-void fix_normalization_or_throw(
-        bool is_append, const TimeseriesDescriptor& existing_tsd, const pipelines::InputFrame& new_frame,
-        bool dynamic_schema
-);
-
-proto::descriptors::NormalizationMetadata generate_norm_meta(
-        const std::vector<entity::OutputSchema>& input_schemas, std::unordered_set<size_t>&& non_matching_name_indices
-);
-
-void accumulate_norm_metadata_column_names(
-        proto::descriptors::NormalizationMetadata& accumulated,
-        const proto::descriptors::NormalizationMetadata& new_entry
+/// In case both indexes are row-ranged sanity checks will be performed:
+/// * Both indexes must have the same step
+/// * The new index must start at the point where the old one ends
+/// If the checks above pass update the new normalization index so that it spans the whole index (old + new).
+/// A no-op for input types that have no pandas index, such as an ndarray or a pickled object.
+/// @throws In case the row-ranged indexes are incompatible
+void update_rowcount_normalization_data(
+        const proto::descriptors::NormalizationMetadata& old_norm, proto::descriptors::NormalizationMetadata& new_norm,
+        size_t old_length
 );
 } // namespace arcticdb

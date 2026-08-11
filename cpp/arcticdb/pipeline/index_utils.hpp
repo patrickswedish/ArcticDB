@@ -126,15 +126,10 @@ std::pair<index::IndexSegmentReader, std::vector<SliceAndKey>> read_index_to_vec
         const std::shared_ptr<Store>& store, const AtomKey& index_key
 );
 
-// Combines the stream descriptors of an existing index key and a new frame.
-// Can be used to get the metadata for [write_index] when updating or appending.
-TimeseriesDescriptor get_merged_tsd(
-        size_t row_count, bool dynamic_schema, const TimeseriesDescriptor& existing_tsd,
-        const std::shared_ptr<pipelines::InputFrame>& new_frame
-);
-
 [[nodiscard]] bool is_timeseries_index(const IndexDescriptorImpl& index_desc);
 
+// Deliberately a second implementation of what schema_combine.cpp's required_fields_info computes: this one answers
+// the question for a descriptor that is already on disk, where there is nothing to reconcile and no schema to build.
 // If NormalizationMetadata is not provided, or specifies the return type is not a Series or DataFrame, returns the
 // index field count from the stream descriptor.
 // Otherwise, the behaviour depends on whether the data has a multiindex, and whether or not the data is a Series.

@@ -44,7 +44,9 @@ def test_compat_exception():
 
 def test_pickling_error(lmdb_version_store):
     lmdb_version_store.write("sym", [1, 2, 3])
-    with pytest.raises(InternalException):
+    # A pickled object is a single opaque blob, so there is no meaning to laying two of them end to end. That is a
+    # disagreement about what kind of thing is being appended, hence a normalization error.
+    with pytest.raises(NormalizationException):
         lmdb_version_store.append("sym", [4, 5, 6])
 
 

@@ -293,48 +293,12 @@ def test_write_tz(lmdb_version_store, sym, tz):
 
 
 @pytest.mark.parametrize("action", [lambda lib, sym, df: lib.append(sym, df), lambda lib, sym, df: lib.update(sym, df)])
-class TestTimezoneIsOverwritten:
+class TestMismatchedTimezoneIsCleared:
     """
-    See Monday 12029540807
-    It's a known bug that with append/update the metadata will overwrite the timezone. It's a breaking change to fix it.
-    Wait for version 7 to be released.
+    Neither of two disagreeing timezones describes the combined data, so append and update clear it rather than
+    letting the newer one win. See Monday 12029540807.
     """
 
-    def test_dataframe_with_different_index_timezone(self, in_memory_store_factory, action):
-        lib = in_memory_store_factory()
-        sym = "test_append_with_different_index_timezone"
-        df1 = pd.DataFrame(
-            {"value": [1]},
-            index=pd.date_range(pd.Timestamp("2025-01-01"), periods=1, tz="America/New_York"),
-        )
-        lib.write(sym, df1)
-        df2 = pd.DataFrame(
-            {"value": [2]},
-            index=pd.date_range(pd.Timestamp("2025-01-02"), periods=1, tz="Europe/London"),
-        )
-        action(lib, sym, df2)
-        assert lib.read(sym).data.index.tz == df2.index.tz
-
-    def test_series_with_different_index_timezone(self, in_memory_store_factory, action):
-        lib = in_memory_store_factory()
-        sym = "test_append_with_different_index_timezone"
-        series1 = pd.Series(
-            [1],
-            index=pd.date_range(pd.Timestamp("2025-01-01"), periods=1, tz="America/New_York"),
-        )
-        lib.write(sym, series1)
-        series2 = pd.Series(
-            [2],
-            index=pd.date_range(pd.Timestamp("2025-01-02"), periods=1, tz="Europe/London"),
-        )
-        action(lib, sym, series2)
-        assert lib.read(sym).data.index.tz == series2.index.tz
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Monday 12029540807: the timezone should be cleared on mismatch, not overwritten. Remove this and "
-        "the overwrite assertions above together.",
-    )
     @pytest.mark.parametrize("frame_type", ["dataframe", "series"])
     def test_mismatched_index_timezone_is_cleared(self, in_memory_store_factory, action, frame_type):
         # Neither timezone describes the combined data, so the result should be timezone-naive.
@@ -360,11 +324,6 @@ class TestTimezoneIsOverwritten:
         action(lib, sym, second)
         assert str(lib.read(sym).data.index.tz) == "Europe/London"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Monday 12029540807: a mismatched multi-index level timezone should be cleared, not overwritten. "
-        "Remove this and the overwrite assertions below together.",
-    )
     @pytest.mark.parametrize("frame_type", ["dataframe", "series"])
     def test_mismatched_multiindex_level_timezone_is_cleared(self, in_memory_store_factory, action, frame_type):
         lib = in_memory_store_factory()
@@ -393,36 +352,6 @@ class TestTimezoneIsOverwritten:
         lib.write(sym, first)
         action(lib, sym, second)
         assert str(lib.read(sym).data.index.levels[0].tz) == "Europe/London"
-
-    def test_dataframe_multiindex_with_different_index_timezone(self, in_memory_store_factory, action):
-        lib = in_memory_store_factory()
-        sym = "multiindex_with_different_index_timezone"
-        df1 = pd.DataFrame(
-            {"a": [1]},
-            index=pd.MultiIndex.from_tuples([(pd.Timestamp(0, tz="America/New_York"), 1)], names=["date", "value"]),
-        )
-        lib.write(sym, df1)
-        df2 = pd.DataFrame(
-            {"a": [2]},
-            index=pd.MultiIndex.from_tuples([(pd.Timestamp(1, tz="Europe/London"), 2)], names=["date", "value"]),
-        )
-        action(lib, sym, df2)
-        assert lib.read(sym).data.index.levels[0].tz == df2.index.levels[0].tz
-
-    def test_series_multiindex_with_different_index_timezone(self, in_memory_store_factory, action):
-        lib = in_memory_store_factory()
-        sym = "multiindex_with_different_index_timezone"
-        series1 = pd.Series(
-            [1],
-            index=pd.MultiIndex.from_tuples([(pd.Timestamp(0, tz="America/New_York"), 1)], names=["date", "value"]),
-        )
-        lib.write(sym, series1)
-        series2 = pd.Series(
-            [2],
-            index=pd.MultiIndex.from_tuples([(pd.Timestamp(1, tz="Europe/London"), 2)], names=["date", "value"]),
-        )
-        action(lib, sym, series2)
-        assert lib.read(sym).data.index.levels[0].tz == series2.index.levels[0].tz
 
 
 @pytest.mark.parametrize(

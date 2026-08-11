@@ -146,10 +146,7 @@ void declare_resample_clause(py::module& version) {
             .def("__str__", &ResampleClause<closed_boundary>::to_string);
 }
 
-void register_bindings(py::module& version, py::exception<arcticdb::ArcticException>& base_exception) {
-
-    py::register_local_exception<StreamDescriptorMismatch>(version, "StreamDescriptorMismatch", base_exception.ptr());
-
+void register_bindings(py::module& version, py::exception<arcticdb::ArcticException>&) {
     // Useful for enterprise
     auto constants = version.def_submodule("constants", "Reserved stream id constants used by ArcticDB");
     constants.attr("WRITE_VERSION_ID") = py::str(WriteVersionId);

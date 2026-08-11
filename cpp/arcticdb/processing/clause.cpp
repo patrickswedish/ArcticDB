@@ -1125,9 +1125,7 @@ std::vector<EntityId> ConcatClause::process(std::vector<EntityId>&& entity_ids) 
 
 OutputSchema ConcatClause::join_schemas(std::vector<OutputSchema>&& input_schemas) const {
     util::check(!input_schemas.empty(), "Cannot join empty list of schemas");
-    auto [stream_desc, norm_meta] = join_indexes(input_schemas);
-    join_type_ == JoinType::INNER ? inner_join(stream_desc, input_schemas) : outer_join(stream_desc, input_schemas);
-    return {std::move(stream_desc), std::move(norm_meta)};
+    return combine_schema(input_schemas, concat_options(join_type_));
 }
 
 std::string ConcatClause::to_string() const { return "CONCAT"; }

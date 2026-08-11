@@ -14,6 +14,7 @@
 #include <arcticdb/stream/python_bindings.hpp>
 #include <arcticdb/toolbox/python_bindings.hpp>
 #include <arcticdb/version/python_bindings.hpp>
+#include <arcticdb/version/schema_checks.hpp>
 #include <arcticdb/util/python_bindings.hpp>
 #include <arcticdb/log/log.hpp>
 #include <arcticdb/util/preconditions.hpp>
@@ -251,6 +252,11 @@ PYBIND11_MODULE(arcticdb_ext, m) {
 
     auto version_submodule = m.def_submodule("version_store", "Versioned storage implementation apis");
     version_store::register_bindings(version_submodule, base_exception);
+    // A descriptor mismatch is a schema error, so it derives from SchemaException here as it does in C++. Anything
+    // catching StreamDescriptorMismatch keeps working; anything catching SchemaException now catches this too.
+    py::register_local_exception<StreamDescriptorMismatch>(
+            version_submodule, "StreamDescriptorMismatch", exceptions.attr("SchemaException").ptr()
+    );
     py::register_local_exception<NoSuchVersionException>(
             version_submodule, "NoSuchVersionException", no_data_found_exception.ptr()
     );
