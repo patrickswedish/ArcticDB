@@ -498,6 +498,22 @@ std::optional<ArrowMeta::ColumnMeta> generate_column_metadata(const sparrow::arr
         }
         break;
     }
+    case DataType::UTF_DYNAMIC32:
+    case DataType::UTF_DYNAMIC64: {
+        opt_column_meta.emplace();
+        if (array.dictionary().has_value()) {
+            opt_column_meta->set_string_format(proto::descriptors::ArrowStringFormat::CATEGORICAL);
+        } else if (array.data_type() == sparrow::data_type::LARGE_STRING) {
+            opt_column_meta->set_string_format(proto::descriptors::ArrowStringFormat::LARGE_STRING);
+        } else if (array.data_type() == sparrow::data_type::STRING) {
+            opt_column_meta->set_string_format(proto::descriptors::ArrowStringFormat::SMALL_STRING);
+        } else {
+            internal::raise<ErrorCode::E_ASSERTION_FAILURE>(
+                    "Unexpected Arrow data type in generate_column_metadata {}",
+                    sparrow::data_type_to_format(array.data_type())
+            );
+        }
+    }
     default:
         break;
     }
