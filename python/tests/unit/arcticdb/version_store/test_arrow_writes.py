@@ -1773,3 +1773,92 @@ def test_validate_index_arrow_batch(lmdb_version_store_arrow, method, validate_i
     else:
         result = ops[method]()
         assert all(not isinstance(r, DataError) for r in result)
+
+
+def test_roundtrip_string_types_pyarrow(in_memory_version_store_arrow):
+    lib = in_memory_version_store_arrow
+    sym = "test_roundtrip_string_types"
+    values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    data = {
+        "small_string": pa.array(values, pa.string()),
+        "large_string": pa.array(values, pa.large_string()),
+        "dict_encoded": pa.compute.dictionary_encode(pa.array(values, pa.large_string())),
+    }
+    table = pa.table(data)
+    lib.write(sym, table)
+    received_pyarrow = lib.read(sym).data
+    assert received_pyarrow.schema.field(0).type == pa.string()
+    assert received_pyarrow.schema.field(1).type == pa.large_string()
+    assert received_pyarrow.schema.field(2).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert_arrow_equal(table, received_pyarrow)
+    received_polars = lib.read(sym, output_format="polars").data
+    # Polars doesn't support small strings, so they should be mapped to large strings
+    assert received_polars.dtypes == [pl.String, pl.String, pl.Categorical]
+    assert_arrow_equal(table, received_polars)
+
+
+def test_roundtrip_string_types_polars(in_memory_version_store_arrow):
+    lib = in_memory_version_store_arrow
+    sym = "test_roundtrip_string_types_polars"
+    values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    data = {
+        "large_string": pl.Series(values, dtype=pl.String),
+        "dict_encoded": pl.Series(values, dtype=pl.Categorical),
+    }
+    df = pl.DataFrame(data)
+    lib.write(sym, df)
+    received_pyarrow = lib.read(sym).data
+    assert received_pyarrow.schema.field(0).type == pa.large_string()
+    assert received_pyarrow.schema.field(1).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert_arrow_equal(df, received_pyarrow)
+    received_polars = lib.read(sym, output_format="polars").data
+    assert received_polars.dtypes == [pl.String, pl.Categorical]
+    assert_arrow_equal(df, received_polars)
+
+
+@pytest.mark.parametrize("method", ["append", "update"])
+def test_modify_type(in_memory_version_store_arrow, method):
+    lib = in_memory_version_store_arrow
+    sym = "test_modify_type"
+    write_values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    write_data = {
+        "ts": pa.Array.from_pandas(pd.date_range("2026-01-01", periods=len(write_values)), type=pa.timestamp("ns")),
+        "small_to_small": pa.array(write_values, pa.string()),
+        "small_to_large": pa.array(write_values, pa.string()),
+        "small_to_dict": pa.array(write_values, pa.string()),
+        "large_to_small": pa.array(write_values, pa.large_string()),
+        "large_to_large": pa.array(write_values, pa.large_string()),
+        "large_to_dict": pa.array(write_values, pa.large_string()),
+        "dict_to_small": pa.compute.dictionary_encode(pa.array(write_values, pa.large_string())),
+        "dict_to_large": pa.compute.dictionary_encode(pa.array(write_values, pa.large_string())),
+        "dict_to_dict": pa.compute.dictionary_encode(pa.array(write_values, pa.large_string())),
+    }
+    write_table = pa.table(write_data)
+    lib.write(sym, write_table, index_column=True)
+    modify_values = ["goodbye", "au revoir", "auf wiedersehen", "arrivederci", "baibai", "sayonara"]
+    modify_data = {
+        "ts": pa.Array.from_pandas(pd.date_range("2026-02-01", periods=len(write_values)), type=pa.timestamp("ns")),
+        "small_to_small": pa.array(modify_values, pa.string()),
+        "small_to_large": pa.array(modify_values, pa.large_string()),
+        "small_to_dict": pa.compute.dictionary_encode(pa.array(modify_values, pa.large_string())),
+        "large_to_small": pa.array(modify_values, pa.string()),
+        "large_to_large": pa.array(modify_values, pa.large_string()),
+        "large_to_dict": pa.compute.dictionary_encode(pa.array(modify_values, pa.large_string())),
+        "dict_to_small": pa.array(modify_values, pa.string()),
+        "dict_to_large": pa.array(modify_values, pa.large_string()),
+        "dict_to_dict": pa.compute.dictionary_encode(pa.array(modify_values, pa.large_string())),
+    }
+    modify_table = pa.table(modify_data)
+    getattr(lib, method)(sym, modify_table, index_column=True)
+    received_pyarrow = lib.read(sym).data
+    assert received_pyarrow.schema.field(0).type == pa.timestamp("ns")
+    assert received_pyarrow.schema.field(1).type == pa.string()
+    assert received_pyarrow.schema.field(2).type == pa.large_string()
+    assert received_pyarrow.schema.field(3).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert received_pyarrow.schema.field(4).type == pa.string()
+    assert received_pyarrow.schema.field(5).type == pa.large_string()
+    assert received_pyarrow.schema.field(6).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert received_pyarrow.schema.field(7).type == pa.string()
+    assert received_pyarrow.schema.field(8).type == pa.large_string()
+    assert received_pyarrow.schema.field(9).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert_arrow_equal(pa.concat_tables([write_table, modify_table], promote_options="permissive"), received_pyarrow)
