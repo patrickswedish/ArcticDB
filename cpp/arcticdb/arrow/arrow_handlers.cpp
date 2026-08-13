@@ -388,6 +388,8 @@ void ArrowStringHandler::convert_type(
     case ArrowOutputStringFormat::SMALL_STRING:
         encode_variable_length<int32_t>(source_column, dest_column, mapping, string_pool);
         break;
+    default:
+        util::raise_rte("Unknown arrow string output format {}", static_cast<int32_t>(string_format));
     }
 }
 
