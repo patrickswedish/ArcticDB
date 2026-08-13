@@ -1817,7 +1817,7 @@ def test_roundtrip_string_types_polars(in_memory_version_store_arrow):
 
 
 @pytest.mark.parametrize("method", ["append", "update"])
-def test_modify_type(in_memory_version_store_arrow, method):
+def test_modify_string_type(in_memory_version_store_arrow, method):
     lib = in_memory_version_store_arrow
     sym = "test_modify_type"
     write_values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
@@ -1862,3 +1862,82 @@ def test_modify_type(in_memory_version_store_arrow, method):
     assert received_pyarrow.schema.field(8).type == pa.large_string()
     assert received_pyarrow.schema.field(9).type == pa.dictionary(pa.int32(), pa.large_string())
     assert_arrow_equal(pa.concat_tables([write_table, modify_table], promote_options="permissive"), received_pyarrow)
+
+
+def test_override_string_type_lib_level(in_memory_version_store_arrow, any_arrow_string_format):
+    lib = in_memory_version_store_arrow
+    lib.set_arrow_string_format_default(any_arrow_string_format)
+    sym = "test_override_type_lib_level"
+    values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    data = {
+        "small_string": pa.array(values, pa.string()),
+        "large_string": pa.array(values, pa.large_string()),
+        "dict_encoded": pa.compute.dictionary_encode(pa.array(values, pa.large_string())),
+    }
+    table = pa.table(data)
+    lib.write(sym, table)
+    received = lib.read(sym).data
+    if any_arrow_string_format == ArrowOutputStringFormat.SMALL_STRING:
+        expected_type = pa.string()
+    elif any_arrow_string_format == ArrowOutputStringFormat.LARGE_STRING:
+        expected_type = pa.large_string()
+    else:
+        expected_type = pa.dictionary(pa.int32(), pa.large_string())
+    assert received.schema.field(0).type == expected_type
+    assert received.schema.field(1).type == expected_type
+    assert received.schema.field(2).type == expected_type
+    for i, name in enumerate(table.column_names):
+        table = table.set_column(i, name, table.column(i).cast(expected_type))
+    assert_arrow_equal(table, received)
+
+
+def test_override_string_type_read_default_level(in_memory_version_store_arrow, any_arrow_string_format):
+    lib = in_memory_version_store_arrow
+    sym = "test_override_string_type_read_default_level"
+    values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    data = {
+        "small_string": pa.array(values, pa.string()),
+        "large_string": pa.array(values, pa.large_string()),
+        "dict_encoded": pa.compute.dictionary_encode(pa.array(values, pa.large_string())),
+    }
+    table = pa.table(data)
+    lib.write(sym, table)
+    received = lib.read(sym, arrow_string_format_default=any_arrow_string_format).data
+    if any_arrow_string_format == ArrowOutputStringFormat.SMALL_STRING:
+        expected_type = pa.string()
+    elif any_arrow_string_format == ArrowOutputStringFormat.LARGE_STRING:
+        expected_type = pa.large_string()
+    else:
+        expected_type = pa.dictionary(pa.int32(), pa.large_string())
+    assert received.schema.field(0).type == expected_type
+    assert received.schema.field(1).type == expected_type
+    assert received.schema.field(2).type == expected_type
+    for i, name in enumerate(table.column_names):
+        table = table.set_column(i, name, table.column(i).cast(expected_type))
+    assert_arrow_equal(table, received)
+
+
+def test_override_string_type_read_per_column_level(in_memory_version_store_arrow):
+    lib = in_memory_version_store_arrow
+    sym = "test_override_string_type_read_per_column_level"
+    values = ["hello", "bonjour", "gutentag", "ciao", "nihao", "konichiwa"]
+    data = {
+        "small_string": pa.array(values, pa.string()),
+        "large_string": pa.array(values, pa.large_string()),
+        "dict_encoded": pa.compute.dictionary_encode(pa.array(values, pa.large_string())),
+    }
+    table = pa.table(data)
+    lib.write(sym, table)
+    overrides = {
+        "small_string": ArrowOutputStringFormat.LARGE_STRING,
+        "large_string": ArrowOutputStringFormat.DICTIONARY_ENCODED,
+        "dict_encoded": ArrowOutputStringFormat.SMALL_STRING,
+    }
+    received = lib.read(sym, arrow_string_format_per_column=overrides).data
+    assert received.schema.field(0).type == pa.large_string()
+    assert received.schema.field(1).type == pa.dictionary(pa.int32(), pa.large_string())
+    assert received.schema.field(2).type == pa.string()
+    table = table.set_column(0, "small_string", table.column(0).cast(pa.large_string()))
+    table = table.set_column(1, "large_string", table.column(1).cast(pa.dictionary(pa.int32(), pa.large_string())))
+    table = table.set_column(2, "dict_encoded", table.column(2).cast(pa.string()))
+    assert_arrow_equal(table, received)
