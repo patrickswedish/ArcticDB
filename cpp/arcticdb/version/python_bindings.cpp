@@ -230,7 +230,8 @@ void register_bindings(py::module& version, py::exception<arcticdb::ArcticExcept
     py::enum_<ArrowOutputStringFormat>(version, "InternalArrowOutputStringFormat")
             .value("CATEGORICAL", ArrowOutputStringFormat::CATEGORICAL)
             .value("LARGE_STRING", ArrowOutputStringFormat::LARGE_STRING)
-            .value("SMALL_STRING", ArrowOutputStringFormat::SMALL_STRING);
+            .value("SMALL_STRING", ArrowOutputStringFormat::SMALL_STRING)
+            .value("UNSPECIFIED", ArrowOutputStringFormat::UNSPECIFIED);
 
     py::enum_<PandasStringFormat>(version, "InternalPandasStringFormat")
             .value("OBJECT", PandasStringFormat::OBJECT)

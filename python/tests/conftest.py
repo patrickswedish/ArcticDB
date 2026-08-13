@@ -1771,6 +1771,8 @@ def in_memory_version_store_tiny_segment_dynamic(in_memory_store_factory) -> Nat
 def in_memory_version_store_arrow(in_memory_store_factory) -> NativeVersionStore:
     store = in_memory_store_factory(dynamic_strings=True)
     store.set_output_format(OutputFormat.PYARROW)
+    # Set output string format to LARGE_STRING here as well, and then override in default-specific tests?
+    # Or explicitly set in tests that fail after this change?
     store._set_allow_arrow_input()
     return store
 

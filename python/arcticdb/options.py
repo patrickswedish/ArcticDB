@@ -240,6 +240,11 @@ class ArrowOutputStringFormat(str, Enum):
         Deduplicates strings, reducing memory usage and improving performance when the number of
         unique values is much smaller than the total number of rows.
 
+    UNSPECIFIED:
+        If data was written using an Arrow format, then for each column, use the format that was
+        written. If it was not written using an Arrow format, then it will default to
+        LARGE_STRING.
+
     For more details on physical layouts, see the Apache Arrow specification:
     https://arrow.apache.org/docs/format/Columnar.html
     """
@@ -248,6 +253,7 @@ class ArrowOutputStringFormat(str, Enum):
     DICTIONARY_ENCODED = "DICTIONARY_ENCODED"
     LARGE_STRING = "LARGE_STRING"
     SMALL_STRING = "SMALL_STRING"
+    UNSPECIFIED = "UNSPECIFIED"
 
 
 def arrow_output_string_format_to_internal(
@@ -276,6 +282,8 @@ def arrow_output_string_format_to_internal(
                 "SMALL_STRING is not supported with POLARS output format. Please use LARGE_STRING instead."
             )
         return InternalArrowOutputStringFormat.SMALL_STRING
+    elif arrow_string_format == ArrowOutputStringFormat.UNSPECIFIED:
+        return InternalArrowOutputStringFormat.UNSPECIFIED
     else:
         raise ValueError(f"Unkown ArrowOutputStringFormat: {arrow_string_format}")
 
@@ -285,7 +293,7 @@ class RuntimeOptions:
         self,
         *,
         output_format: Union[OutputFormat, str] = OutputFormat.PANDAS,
-        arrow_string_format_default: ArrowOutputStringFormat = ArrowOutputStringFormat.LARGE_STRING,
+        arrow_string_format_default: ArrowOutputStringFormat = ArrowOutputStringFormat.UNSPECIFIED,
     ):
         self.output_format = output_format
         self.arrow_string_format_default = arrow_string_format_default
