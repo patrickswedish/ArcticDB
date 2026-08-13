@@ -1076,9 +1076,9 @@ def test_filter_string_less_than(lmdb_version_store_v1, any_output_format):
     lib.write(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", df, dynamic_strings=False)
     q = QueryBuilder()
     q = q[q["a"] < "row2"]
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{DYNAMIC_STRINGS_SUFFIX}", query_builder=q).data
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", query_builder=q).data
 
 
@@ -1091,9 +1091,9 @@ def test_filter_string_less_than_equal(lmdb_version_store_v1, any_output_format)
     lib.write(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", df, dynamic_strings=False)
     q = QueryBuilder()
     q = q[q["a"] <= "row2"]
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{DYNAMIC_STRINGS_SUFFIX}", query_builder=q).data
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", query_builder=q).data
 
 
@@ -1106,9 +1106,9 @@ def test_filter_string_greater_than(lmdb_version_store_v1, any_output_format):
     lib.write(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", df, dynamic_strings=False)
     q = QueryBuilder()
     q = q[q["a"] > "row2"]
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{DYNAMIC_STRINGS_SUFFIX}", query_builder=q).data
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", query_builder=q).data
 
 
@@ -1121,9 +1121,9 @@ def test_filter_string_greater_than_equal(lmdb_version_store_v1, any_output_form
     lib.write(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", df, dynamic_strings=False)
     q = QueryBuilder()
     q = q[q["a"] >= "row2"]
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{DYNAMIC_STRINGS_SUFFIX}", query_builder=q).data
-    with pytest.raises(InternalException):
+    with pytest.raises(UserInputException):
         lib.read(f"{base_symbol}_{FIXED_STRINGS_SUFFIX}", query_builder=q).data
 
 
