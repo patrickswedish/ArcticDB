@@ -226,7 +226,15 @@ message NormalizationMetadata {
 
     message ExperimentalArrow {
         message ColumnMeta {
+            enum StringFormat {
+                CATEGORICAL = 0;
+                LARGE_STRING = 1;
+                SMALL_STRING = 2;
+            }
+            // Could make these a oneof, as they are mutually exclusive. But there may be other column-specific
+            // metadata in future that is not mutually exclusive, so this is more extensible.
             optional string timezone = 1;
+            optional StringFormat string_format = 2;
         }
 
         bool has_index = 1;
