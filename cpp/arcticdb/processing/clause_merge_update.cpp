@@ -8,6 +8,7 @@
 
 #include <arcticdb/processing/clause.hpp>
 #include <arcticdb/processing/processing_unit.hpp>
+#include <arcticdb/column_store/column_reslicer.hpp>
 #include <arcticdb/column_store/string_pool.hpp>
 #include <arcticdb/util/offset_string.hpp>
 #include <arcticdb/pipeline/frame_slice.hpp>
@@ -256,14 +257,23 @@ struct InsertTargetData {
     std::span<ColumnWithStrings> columns;
     TypeDescriptor type;
     TargetRange range;
-    StringPool& new_string_pool;
+    /// Layout of the M output row slices for this column slice's merge. Owned by the caller (update_and_insert),
+    /// which builds it once for the whole group rather than once per column, as merge is called once per column.
+    const ReslicingInfo& reslicing_info;
+    std::span<const size_t> target_slice_offset;
+    /// One non-owning pointer per output row slice, ascending row order. Each points at the string pool owned by
+    /// the output segment that row slice will end up in, so strings are written into their final pool directly.
+    std::span<StringPool* const> output_string_pools;
 };
 
-std::vector<size_t> compute_target_slice_offset(const InsertTargetData& target) {
+/// Computes, per target row slice, the number of output rows contributed by all earlier target row slices in the
+/// same group. Moved out of merge and computed once per group by the caller, since it does not depend on which
+/// column is being merged.
+std::vector<size_t> compute_target_slice_offset(std::span<const ColumnWithStrings> target_indexes) {
     std::vector<size_t> result;
     std::transform_exclusive_scan(
-            target.indexes.begin(),
-            target.indexes.end(),
+            target_indexes.begin(),
+            target_indexes.end(),
             std::back_inserter(result),
             size_t{0},
             std::plus{},
@@ -277,15 +287,21 @@ std::vector<size_t> compute_target_slice_offset(const InsertTargetData& target) 
 /// is_sorted(index in row slice i) && all(index values in row slice i) <= all(index values in row slice j) for i < j.
 /// The source is a single row slice.  Insertion is stable and all new values are inserted after all existing values
 /// with the same index value. The source and target must have the same index type.
+/// The output is split across target.reslicing_info.num_segments pre-sized columns, so that every merged element is
+/// written exactly once, straight to the output row slice it will end up in. This is one unconditional code path for
+/// every value of num_segments, including 1: when num_segments == 1 every one of the vectors below has length 1, the
+/// boundary branch in advance_output is never taken, and the random-write resolver always returns slice 0.
 template<util::type_descriptor_tag TargetColumnTypeDescriptorTag, typename SourceRawType>
 requires(TargetColumnTypeDescriptorTag::dimension() == Dimension::Dim0)
-Column merge(
+std::vector<Column> merge(
         const InsertSourceData<SourceRawType>& source, const InsertTargetData& target,
         const MergeUpdateClause::MatchRecord& match_record, const MergeStrategy& strategy
 ) {
     using IndexType = ScalarTagType<DataTypeTag<DataType::NANOSECONDS_UTC64>>;
     // One index value can appear in more than one row slice. In that case it can be shared by two processing units,
     // each working on part of the target data.
+    // This recomputes what the caller already knows as target.reslicing_info.total_rows, purely so the two
+    // definitions of the combined row count cannot silently diverge; see the ARCTICDB_DEBUG_CHECK below.
     const size_t num_rows_out_of_target_range =
             target.range.start_row_in_first_row_slice +
             (target.columns.back().column_->row_count() - target.range.end_row_in_last_row_slice);
@@ -297,12 +313,39 @@ Column merge(
                     [](size_t acc, const ColumnWithStrings& col) { return acc + col.column_->row_count(); }
             ) -
             num_rows_out_of_target_range;
-    const std::vector<size_t> target_slice_offset = compute_target_slice_offset(target);
+    ARCTICDB_DEBUG_CHECK(
+            ErrorCode::E_ASSERTION_FAILURE,
+            combined_row_count == target.reslicing_info.total_rows,
+            "merge: combined row count {} computed from this column's target slices does not match "
+            "reslicing_info.total_rows {} computed by the caller",
+            combined_row_count,
+            target.reslicing_info.total_rows
+    );
 
-    Column new_column(target.type, combined_row_count, AllocationType::PRESIZED, Sparsity::NOT_PERMITTED);
-    ColumnData new_column_data = new_column.data();
-    auto new_column_it = new_column_data.begin<TargetColumnTypeDescriptorTag>();
-    auto new_data = random_accessor<TargetColumnTypeDescriptorTag>(&new_column_data);
+    const size_t num_segments = target.reslicing_info.num_segments;
+    // Pre-reserved and never reallocated: the IRREGULAR random accessor variant retains a pointer into
+    // output_column_datas, so a reallocation here would leave it dangling.
+    std::vector<Column> output_columns;
+    std::vector<ColumnData> output_column_datas;
+    std::vector<ColumnDataRandomAccessor<TargetColumnTypeDescriptorTag>> output_accessors;
+    output_columns.reserve(num_segments);
+    output_column_datas.reserve(num_segments);
+    output_accessors.reserve(num_segments);
+    for (size_t segment_idx = 0; segment_idx < num_segments; ++segment_idx) {
+        output_columns.emplace_back(
+                target.type,
+                target.reslicing_info.rows_in_slice(segment_idx),
+                AllocationType::PRESIZED,
+                Sparsity::NOT_PERMITTED
+        );
+        output_column_datas.emplace_back(output_columns[segment_idx].data());
+        output_accessors.emplace_back(random_accessor<TargetColumnTypeDescriptorTag>(&output_column_datas[segment_idx])
+        );
+    }
+
+    size_t output_col_idx{0};
+    auto new_column_it = output_column_datas[0].begin<TargetColumnTypeDescriptorTag>();
+    auto current_output_end_it = output_column_datas[0].end<TargetColumnTypeDescriptorTag>();
 
     size_t target_row_slice = 0;
     ColumnData target_index_data = target.indexes[target_row_slice].column_->data();
@@ -343,9 +386,18 @@ Column merge(
         }
     };
 
+    // Mirrors advance_target on the output side: rolls the write iterator over to the next output column when the
+    // current one is exhausted. [[unlikely]] because this fires once per output row slice (~every 100k rows), and
+    // never at all when num_segments == 1. Does not roll over past the last column; a shortfall is caught by the
+    // end-state check below instead.
     const auto advance_output = [&] {
         ++new_column_row_idx;
         ++new_column_it;
+        if (new_column_it == current_output_end_it && output_col_idx + 1 < num_segments) [[unlikely]] {
+            ++output_col_idx;
+            new_column_it = output_column_datas[output_col_idx].begin<TargetColumnTypeDescriptorTag>();
+            current_output_end_it = output_column_datas[output_col_idx].end<TargetColumnTypeDescriptorTag>();
+        }
     };
 
     // GIL will be acquired if there is a string that is not pure ASCII/UTF-8
@@ -361,20 +413,20 @@ Column merge(
                     row,
                     RowRange{source.global_row_range.first, source.global_row_range.second},
                     scoped_gil_lock,
-                    target.new_string_pool,
+                    *target.output_string_pools[output_col_idx],
                     target.columns.front().column_name_
             );
         }
     };
 
-    const auto set_string_from_source_at = [&](size_t source_row, size_t output_row) {
+    const auto set_string_from_source_at = [&](size_t source_row, size_t out_col, size_t out_off) {
         if constexpr (is_sequence_type(TargetColumnTypeDescriptorTag::data_type())) {
-            new_data[output_row] = write_py_string_to_pool_or_throw<TargetColumnTypeDescriptorTag>(
+            output_accessors[out_col][out_off] = write_py_string_to_pool_or_throw<TargetColumnTypeDescriptorTag>(
                     source.data[source_row],
                     source_row,
                     RowRange{source.global_row_range.first, source.global_row_range.second},
                     scoped_gil_lock,
-                    target.new_string_pool,
+                    *target.output_string_pools[out_col],
                     target.columns.front().column_name_
             );
         }
@@ -386,14 +438,14 @@ Column merge(
             if (is_a_string(offset)) {
                 const StringPool& pool = *target.columns[target_row_slice].string_pool_;
                 const std::string_view string_data = pool.get_const_view(offset);
-                *new_column_it = target.new_string_pool.get(string_data).offset();
+                *new_column_it = target.output_string_pools[output_col_idx]->get(string_data).offset();
             } else {
                 *new_column_it = offset;
             }
         }
     };
 
-    util::BitSet updated(new_column.row_count());
+    util::BitSet updated(target.reslicing_info.total_rows);
     std::vector<size_t> source_rows_to_insert;
 
     size_t source_row_idx = 0;
@@ -432,16 +484,45 @@ Column merge(
         // Apply updates
         while (source_row_idx < source.index.size() && source.index[source_row_idx] == current_index_value) {
             if (strategy.update()) {
+                // Ordering across source rows sharing current_index_value is not guaranteed (filter_matching_rows
+                // can prune a different target row per source row), so prev_index_in_output is reset here, once per
+                // source_row_idx, rather than once per row slice i. Within one source row, target_slice_offset[i]
+                // ascends with i and matched target rows ascend within one (source_row, i) pair (filter_index_match),
+                // so index_in_output is strictly increasing across this whole inner scope.
+                std::optional<size_t> prev_index_in_output;
                 for (size_t i = 0; i < target.columns.size(); ++i) {
                     const std::vector<size_t>& matched = match_record.matched_rows(i)[source_row_idx];
                     for (size_t target_row : matched) {
-                        const size_t index_in_output = target_slice_offset[i] + total_inserted_rows + target_row -
-                                                       target.range.start_row_in_first_row_slice;
+                        const size_t index_in_output = target.target_slice_offset[i] + total_inserted_rows +
+                                                       target_row - target.range.start_row_in_first_row_slice;
+                        // Locality bound: every random write in one equal-index run lands at or after the
+                        // sequential cursor, since the merge loop has already emitted every target row with a
+                        // strictly smaller index value. Site 3's updated.test(new_column_row_idx) already silently
+                        // depends on this.
+                        ARCTICDB_DEBUG_CHECK(
+                                ErrorCode::E_ASSERTION_FAILURE,
+                                index_in_output >= new_column_row_idx,
+                                "merge: random update write to output row {} precedes the sequential cursor at {}",
+                                index_in_output,
+                                new_column_row_idx
+                        );
+                        ARCTICDB_DEBUG_CHECK(
+                                ErrorCode::E_ASSERTION_FAILURE,
+                                !prev_index_in_output.has_value() || index_in_output > *prev_index_in_output,
+                                "merge: random update writes for one source row must be strictly increasing, got {} "
+                                "after {}",
+                                index_in_output,
+                                prev_index_in_output.value_or(0)
+                        );
+                        prev_index_in_output = index_in_output;
                         updated.set(index_in_output);
+                        // Closed-form resolver: writes are not ordered across source rows sharing one index value,
+                        // so a forward-walking cursor cannot be used here; see merge's doc comment.
+                        const auto [out_col, out_off] = target.reslicing_info.slice_and_offset_for_row(index_in_output);
                         if constexpr (is_sequence_type(TargetColumnTypeDescriptorTag::data_type())) {
-                            set_string_from_source_at(source_row_idx, index_in_output);
+                            set_string_from_source_at(source_row_idx, out_col, out_off);
                         } else {
-                            new_data[index_in_output] = source.data[source_row_idx];
+                            output_accessors[out_col][out_off] = source.data[source_row_idx];
                         }
                     }
                 }
@@ -508,10 +589,35 @@ Column merge(
             advance_output();
         }
     } else {
-        std::copy(source.data.begin() + source_row_idx, source.data.end(), new_column_it);
+        // Bulk-copy the tail, but chunked at output column boundaries: this is the fast path for a large
+        // append-only tail, so each chunk stays a single std::copy_n rather than degrading to an element-wise loop.
+        auto remaining_source_it = source.data.begin() + source_row_idx;
+        while (remaining_source_it != source.data.end()) {
+            const size_t rows_left_in_current_column =
+                    static_cast<size_t>(std::distance(new_column_it, current_output_end_it));
+            const size_t chunk = std::min<size_t>(
+                    static_cast<size_t>(std::distance(remaining_source_it, source.data.end())),
+                    rows_left_in_current_column
+            );
+            std::copy_n(remaining_source_it, chunk, new_column_it);
+            std::advance(remaining_source_it, chunk);
+            std::advance(new_column_it, chunk);
+            new_column_row_idx += chunk;
+            if (new_column_it == current_output_end_it && output_col_idx + 1 < num_segments) {
+                ++output_col_idx;
+                new_column_it = output_column_datas[output_col_idx].begin<TargetColumnTypeDescriptorTag>();
+                current_output_end_it = output_column_datas[output_col_idx].end<TargetColumnTypeDescriptorTag>();
+            }
+        }
     }
 
-    return new_column;
+    util::check(
+            output_col_idx == num_segments - 1 && new_column_it == current_output_end_it,
+            "merge: output columns not fully filled; finished at column {} of {} without reaching its end",
+            output_col_idx,
+            num_segments
+    );
+    return output_columns;
 }
 
 template<util::type_descriptor_tag ScalarType>
@@ -678,12 +784,14 @@ namespace ranges = std::ranges;
 using namespace pipelines;
 
 MergeUpdateClause::MergeUpdateClause(
-        std::vector<std::string>&& on, MergeStrategy strategy, std::shared_ptr<InputFrame> source
+        std::vector<std::string>&& on, MergeStrategy strategy, std::shared_ptr<InputFrame> source,
+        uint64_t rows_per_segment
 ) :
 
     on_(std::move(on)),
     strategy_(strategy),
-    source_(std::move(source)) {
+    source_(std::move(source)),
+    max_rows_per_segment_(max_rows_per_segment_for(rows_per_segment)) {
     std::erase_if(on_, [&](const std::string& column) { return !on_set_.insert(column).second; });
 }
 
@@ -805,12 +913,18 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
         std::vector<EntityId> res;
         for (ProcessingUnit& row_slice : new_row_slices) {
             const size_t entity_count = row_slice.segments_->size();
+            // update() does not resize its row slices, so each one is its own group of one output row slice.
+            const std::vector<size_t> single_row_count{row_slice.segments_->front()->row_count()};
+            auto output_row_counts = std::make_shared<const std::vector<size_t>>(single_row_count);
             std::vector<EntityId> entts = component_manager_->add_entities(
                     std::move(*row_slice.segments_),
                     std::move(*row_slice.row_ranges_),
                     std::move(*row_slice.col_ranges_),
                     std::vector<EntityFetchCount>(entity_count, 1),
-                    std::vector(entity_count, MergeUpdateInsertedRowsComponent{0})
+                    std::vector(
+                            entity_count,
+                            MergeUpdateInsertedRowsComponent{.inserted_rows = 0, .output_row_counts = output_row_counts}
+                    )
             );
             res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
         }
@@ -832,12 +946,19 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
             std::vector<EntityId> res;
             for (ProcessingUnit& row_slice : new_row_slices) {
                 const size_t entity_count = row_slice.segments_->size();
+                const std::vector<size_t> single_row_count{row_slice.segments_->front()->row_count()};
+                auto output_row_counts = std::make_shared<const std::vector<size_t>>(single_row_count);
                 std::vector<EntityId> entts = component_manager_->add_entities(
                         std::move(*row_slice.segments_),
                         std::move(*row_slice.row_ranges_),
                         std::move(*row_slice.col_ranges_),
                         std::vector<EntityFetchCount>(entity_count, 1),
-                        std::vector(entity_count, MergeUpdateInsertedRowsComponent{0}),
+                        std::vector(
+                                entity_count,
+                                MergeUpdateInsertedRowsComponent{
+                                        .inserted_rows = 0, .output_row_counts = output_row_counts
+                                }
+                        ),
                         std::vector(entity_count, unmatched_source_rows_component)
                 );
                 res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
@@ -852,7 +973,8 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
         return {};
     }
 
-    auto new_row_slices = update_and_insert(matched, target_descriptor, std::move(row_slices), source_start_end);
+    auto [new_row_slices, output_row_counts] =
+            update_and_insert(matched, target_descriptor, std::move(row_slices), source_start_end);
 
     std::vector<EntityId> res;
     for (auto& row_slice : new_row_slices) {
@@ -862,7 +984,13 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
                 std::move(*row_slice.row_ranges_),
                 std::move(*row_slice.col_ranges_),
                 std::vector<EntityFetchCount>(entity_count, 1),
-                std::vector(entity_count, MergeUpdateInsertedRowsComponent{matched.total_unmatched_source_rows()})
+                std::vector(
+                        entity_count,
+                        MergeUpdateInsertedRowsComponent{
+                                .inserted_rows = matched.total_unmatched_source_rows(),
+                                .output_row_counts = output_row_counts
+                        }
+                )
         );
         res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
     }
@@ -989,7 +1117,7 @@ std::pair<size_t, size_t> MergeUpdateClause::get_source_start_end(std::span<cons
     }
 }
 
-std::vector<ProcessingUnit> MergeUpdateClause::update_and_insert(
+std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>>> MergeUpdateClause::update_and_insert(
         const MatchRecord& match_record, const StreamDescriptor& target_descriptor,
         std::vector<ProcessingUnit>&& row_slices, std::pair<size_t, size_t> source_start_end
 ) const {
@@ -1023,32 +1151,90 @@ std::vector<ProcessingUnit> MergeUpdateClause::update_and_insert(
             "All row slices should have the same number of column ranges"
     );
 
-    ProcessingUnit result{};
-    result.segments_.emplace();
-    result.segments_->reserve(num_col_slices);
-    result.col_ranges_ = row_slices.front().col_ranges_;
     std::vector<ColumnWithStrings> target_datas;
     std::vector<ColumnWithStrings> target_index_datas;
     target_index_datas.reserve(row_slices.size());
     std::ranges::transform(row_slices, std::back_inserter(target_index_datas), [&](const auto& proc) {
         return ColumnWithStrings(proc.segments_->front()->column_ptr(0), nullptr, target_descriptor.field(0).name());
     });
-    StringPool new_string_pool;
-    bool has_string_column_in_column_slice = false;
     const TargetRange target_range = get_target_start_end(row_slices);
+    const std::vector<size_t> target_slice_offset = compute_target_slice_offset(target_index_datas);
+
+    // The output total, hoisted here rather than recomputed once per merge() call as before: it does not depend on
+    // which column is being merged, only on the target row slices' row counts (any column's row count would do; the
+    // index is used here since target_index_datas is already built), the target range and the number of unmatched
+    // source rows.
+    const size_t num_rows_out_of_target_range =
+            target_range.start_row_in_first_row_slice +
+            (target_index_datas.back().column_->row_count() - target_range.end_row_in_last_row_slice);
+    const size_t output_total =
+            std::accumulate(
+                    target_index_datas.begin(),
+                    target_index_datas.end(),
+                    match_record.total_unmatched_source_rows(),
+                    [](size_t acc, const ColumnWithStrings& col) { return acc + col.column_->row_count(); }
+            ) -
+            num_rows_out_of_target_range;
+    util::check(output_total > 0, "MergeUpdateClause::update_and_insert: computed output_total must be greater than 0");
+    const ReslicingInfo reslicing_info{output_total, max_rows_per_segment_};
+
+    // Create all num_segments x num_col_slices output segments upfront, in column-slice-major order, each with an
+    // empty field collection: add_column appends to both columns_ and the descriptor, so a segment built from the
+    // target's already-populated descriptor would end up with every field twice. This also means the pool-pointer
+    // spans handed to merge below are views over objects that already exist and never move.
+    std::vector<std::vector<SegmentInMemory>> segments;
+    segments.reserve(num_col_slices);
+    for (size_t col_slice_idx = 0; col_slice_idx < num_col_slices; ++col_slice_idx) {
+        const StreamDescriptor& desc = (*row_slices.front().segments_)[col_slice_idx]->descriptor();
+        std::vector<SegmentInMemory> col_slice_segments(reslicing_info.num_segments);
+        for (auto& segment : col_slice_segments) {
+            segment.attach_descriptor(std::make_shared<StreamDescriptor>(
+                    desc.segment_desc_, std::make_shared<FieldCollection>(), desc.stream_id_
+            ));
+        }
+        segments.emplace_back(std::move(col_slice_segments));
+    }
+
+    // Strings are written directly into the output segments' own pools, which are address-stable for the segments'
+    // lifetime, so there is no separate pool to build and no move-into-segment step. Do not call set_string_pool on
+    // these segments while merge holds these pointers below, as that would replace the shared_ptr and invalidate
+    // them.
+    std::vector<std::vector<StringPool*>> output_string_pools(num_col_slices);
+    for (size_t col_slice_idx = 0; col_slice_idx < num_col_slices; ++col_slice_idx) {
+        output_string_pools[col_slice_idx].reserve(reslicing_info.num_segments);
+        for (auto& segment : segments[col_slice_idx]) {
+            output_string_pools[col_slice_idx].push_back(&segment.string_pool());
+        }
+    }
+
     using IndexType = ScalarTagType<DataTypeTag<DataType::NANOSECONDS_UTC64>>;
-    auto new_index = std::make_shared<Column>(merge<IndexType>(
+    std::vector<Column> new_index_columns = merge<IndexType>(
             InsertSourceData{.index = source_index, .data = source_index, .global_row_range = source_start_end},
             InsertTargetData{
                     .indexes = target_index_datas,
                     .columns = target_index_datas,
                     .type = TypeDescriptor{DataType::NANOSECONDS_UTC64, Dimension::Dim0},
                     .range = target_range,
-                    .new_string_pool = new_string_pool
+                    .reslicing_info = reslicing_info,
+                    .target_slice_offset = target_slice_offset,
+                    .output_string_pools = output_string_pools.front()
             },
             match_record,
             MergeStrategy{.not_matched_by_target = MergeAction::INSERT}
-    ));
+    );
+    // The index column must be column 0 of every column slice, so it is shared via the shared_ptr<Column> add_column
+    // overload rather than moved: moving would force num_col_slices - 1 full copies of an N-row index column.
+    std::vector<std::shared_ptr<Column>> index_cols;
+    index_cols.reserve(reslicing_info.num_segments);
+    for (Column& col : new_index_columns) {
+        index_cols.emplace_back(std::make_shared<Column>(std::move(col)));
+    }
+    for (auto& col_slice_segments : segments) {
+        for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+            col_slice_segments[j].add_column(target_descriptor.field(0), index_cols[j]);
+        }
+    }
+
     size_t col_slice_idx = 0;
     const auto [source_start, source_end] = source_start_end;
     for (size_t field_idx = target_descriptor.index().field_count(); field_idx < target_descriptor.field_count();
@@ -1059,54 +1245,89 @@ std::vector<ProcessingUnit> MergeUpdateClause::update_and_insert(
         std::ranges::transform(row_slices, std::back_inserter(target_datas), [&](ProcessingUnit& row_slice) {
             return std::get<ColumnWithStrings>(row_slice.get(ColumnName{column_name}));
         });
-        Column new_column = details::visit_type(target_field.type().data_type(), [&]<typename TypeTag>(TypeTag) {
-            using TargetDataTDT = ScalarTagType<TypeTag>;
-            has_string_column_in_column_slice |= is_sequence_type(TargetDataTDT::data_type());
-            return merge<TargetDataTDT>(
-                    InsertSourceData{
-                            .index = source_index,
-                            .data = source_->get_tensor(field_idx).span<SourceRawType<TargetDataTDT>>(
-                                    source_start, source_end - source_start
-                            ),
-                            .global_row_range = source_start_end
-                    },
-                    InsertTargetData{
-                            .indexes = target_index_datas,
-                            .columns = target_datas,
-                            .type = target_field.type(),
-                            .range = target_range,
-                            .new_string_pool = new_string_pool
-                    },
-                    match_record,
-                    // By construction, we cannot update the columns used to perform the match; only inserts are
-                    // allowed
-                    on_set_.contains(column_name) ? MergeStrategy{.not_matched_by_target = MergeAction::INSERT}
-                                                  : strategy_
-            );
-        });
-        if (field_idx == (*row_slices.front().col_ranges_)[col_slice_idx]->first) {
-            const StreamDescriptor& desc = (*row_slices.front().segments_)[col_slice_idx]->descriptor();
-            result.segments_->emplace_back(std::make_shared<SegmentInMemory>(desc, new_index->row_count()));
-            result.segments_->back()->columns()[0] = new_index;
+        std::vector<Column> new_columns =
+                details::visit_type(target_field.type().data_type(), [&]<typename TypeTag>(TypeTag) {
+                    using TargetDataTDT = ScalarTagType<TypeTag>;
+                    return merge<TargetDataTDT>(
+                            InsertSourceData{
+                                    .index = source_index,
+                                    .data = source_->get_tensor(field_idx).span<SourceRawType<TargetDataTDT>>(
+                                            source_start, source_end - source_start
+                                    ),
+                                    .global_row_range = source_start_end
+                            },
+                            InsertTargetData{
+                                    .indexes = target_index_datas,
+                                    .columns = target_datas,
+                                    .type = target_field.type(),
+                                    .range = target_range,
+                                    .reslicing_info = reslicing_info,
+                                    .target_slice_offset = target_slice_offset,
+                                    .output_string_pools = output_string_pools[col_slice_idx]
+                            },
+                            match_record,
+                            // By construction, we cannot update the columns used to perform the match; only inserts
+                            // are allowed
+                            on_set_.contains(column_name) ? MergeStrategy{.not_matched_by_target = MergeAction::INSERT}
+                                                          : strategy_
+                    );
+                });
+        for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+            segments[col_slice_idx][j].add_column(target_field, std::move(new_columns[j]));
         }
-        const size_t col_in_slice = field_idx - (*row_slices.front().col_ranges_)[col_slice_idx]->first + 1;
-        result.segments_->back()->columns()[col_in_slice] = std::make_shared<Column>(std::move(new_column));
         if (field_idx == (*row_slices.front().col_ranges_)[col_slice_idx]->second - 1) {
-            result.segments_->back()->set_row_data(new_index->row_count() - 1);
+            ARCTICDB_DEBUG_CHECK(
+                    ErrorCode::E_ASSERTION_FAILURE,
+                    std::ranges::all_of(
+                            segments[col_slice_idx],
+                            [&](const SegmentInMemory& segment) {
+                                return columns_match(
+                                        segment.descriptor(),
+                                        (*row_slices.front().segments_)[col_slice_idx]->descriptor()
+                                );
+                            }
+                    ),
+                    "MergeUpdateClause::update_and_insert: rebuilt column slice descriptor does not match the "
+                    "original target descriptor"
+            );
             ++col_slice_idx;
-            if (has_string_column_in_column_slice) {
-                result.segments_->back()->string_pool() = std::move(new_string_pool);
-                new_string_pool.clear();
-                has_string_column_in_column_slice = false;
-            }
         }
     }
+
+    for (auto& col_slice_segments : segments) {
+        for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+            col_slice_segments[j].set_row_data(reslicing_info.rows_in_slice(j) - 1);
+        }
+    }
+
     const auto new_row_range = std::make_shared<RowRange>(
             row_slices.front().row_ranges_->front()->first + target_range.start_row_in_first_row_slice,
             row_slices.back().row_ranges_->back()->first + target_range.end_row_in_last_row_slice
     );
-    result.row_ranges_ = std::vector(num_col_slices, new_row_range);
-    return std::vector{std::move(result)};
+    ProcessingUnit result{};
+    result.segments_.emplace();
+    result.row_ranges_.emplace();
+    result.col_ranges_.emplace();
+    const size_t total_entities = num_col_slices * reslicing_info.num_segments;
+    result.segments_->reserve(total_entities);
+    result.row_ranges_->reserve(total_entities);
+    result.col_ranges_->reserve(total_entities);
+    for (size_t c = 0; c < num_col_slices; ++c) {
+        const auto& col_range = (*row_slices.front().col_ranges_)[c];
+        for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+            result.segments_->emplace_back(std::make_shared<SegmentInMemory>(std::move(segments[c][j])));
+            result.row_ranges_->emplace_back(new_row_range);
+            result.col_ranges_->emplace_back(col_range);
+        }
+    }
+
+    auto output_row_counts = std::make_shared<std::vector<size_t>>();
+    output_row_counts->reserve(reslicing_info.num_segments);
+    for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+        output_row_counts->push_back(reslicing_info.rows_in_slice(j));
+    }
+
+    return {std::vector{std::move(result)}, std::move(output_row_counts)};
 }
 
 std::vector<ProcessingUnit> MergeUpdateClause::update(

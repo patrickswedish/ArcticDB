@@ -9,7 +9,9 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <shared_mutex>
+#include <vector>
 
 #include <entt/entity/registry.hpp>
 
@@ -30,11 +32,17 @@ using namespace entt::literals;
 /// clause adding this entity and then after read_modify_write it reads it in order to compute the correct row ranges
 /// accounting for insertion. If any other piece of code adds this entity to the component manager the merge updates
 /// will iterate over them as well, producing wrong results. See merge_update_impl and Monday 12618296803
+///
+/// Carries the group's output row-slice layout so that merge_slices_and_keys can split a group's merged output into
+/// several output row slices while still recognising them as one group. Invariant:
+/// sum(*output_row_counts) == consumed_row_range.diff() + inserted_rows, where consumed_row_range is the RowRange
+/// key this component is stored under in merge_slices_and_keys's map. Every entity created for one processing group
+/// carries an identical component value. No user-declared constructors: kept as an aggregate so it can be built with
+/// designated initializers at each call site.
 struct MergeUpdateInsertedRowsComponent {
-    MergeUpdateInsertedRowsComponent() = default;
-    MergeUpdateInsertedRowsComponent(const size_t inserted_rows) : inserted_rows(inserted_rows) {}
-    operator size_t() const { return inserted_rows; }
     size_t inserted_rows = 0;
+    /// One entry per output row slice belonging to this group, in ascending row order.
+    std::shared_ptr<const std::vector<size_t>> output_row_counts;
 };
 
 /// Used only by the MergeUpdateClause, and only for row-count indexed targets. After the pipeline finishes,

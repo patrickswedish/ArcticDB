@@ -861,7 +861,13 @@ struct MergeUpdateClause {
     MergeStrategy strategy_;
     std::shared_ptr<InputFrame> source_;
     bool fake_index_name_ = false;
-    MergeUpdateClause(std::vector<std::string>&& on, MergeStrategy strategy, std::shared_ptr<InputFrame> source);
+    /// Maximum number of rows in one output row slice, derived from rows_per_segment via max_rows_per_segment_for.
+    /// Merge update only ever splits, so there is no equivalent min_rows_per_segment_.
+    uint64_t max_rows_per_segment_;
+    MergeUpdateClause(
+            std::vector<std::string>&& on, MergeStrategy strategy, std::shared_ptr<InputFrame> source,
+            uint64_t rows_per_segment
+    );
     ARCTICDB_MOVE_COPY_DEFAULT(MergeUpdateClause)
 
     /// Row range indexes require full table scan
@@ -915,7 +921,10 @@ struct MergeUpdateClause {
     };
 
   private:
-    std::vector<ProcessingUnit> update_and_insert(
+    /// Returns the group's output row slices (empty if there was nothing to insert and the group was left
+    /// untouched) alongside the group's output row counts, one entry per output row slice in ascending row order,
+    /// needed by process() to populate MergeUpdateInsertedRowsComponent::output_row_counts.
+    std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>>> update_and_insert(
             const MatchRecord& match_record, const StreamDescriptor& target_descriptor,
             std::vector<ProcessingUnit>&& row_slices, std::pair<size_t, size_t> source_start_end
     ) const;

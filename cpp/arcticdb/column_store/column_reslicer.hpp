@@ -9,15 +9,28 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <arcticdb/column_store/column.hpp>
 #include <arcticdb/column_store/string_pool.hpp>
 #include <arcticdb/entity/type_utils.hpp>
 #include <arcticdb/processing/expression_node.hpp>
+#include <arcticdb/util/preconditions.hpp>
 
 namespace arcticdb {
+
+// Magic range of +-33% chosen so that:
+// - 2 row slices with < min_rows_per_segment cannot be combined into one row slice with > max_rows_per_segment
+// - 1 row slice with a little more than max_rows_per_segment when split in half will still have
+//   >= min_rows_per_segment in each resulting row slice
+// See CompactDataClause's constructor for the matching min_rows_per_segment derivation.
+constexpr uint64_t max_rows_per_segment_for(uint64_t rows_per_segment) {
+    // If rows_per_segment == 2 the result would be 2 without the std::max
+    return std::max((4 * rows_per_segment) / 3, rows_per_segment + 1);
+}
 
 // Helper class used by both the column and segment reslicer classes
 class ReslicingInfo {
@@ -41,6 +54,26 @@ class ReslicingInfo {
 
     uint64_t rows_in_slice(uint64_t idx) const {
         return idx < num_exact_segments ? rows_per_segment : rows_per_segment + 1;
+    }
+
+    // The exact inverse of rows_in_slice: given a row index into the combined [0, total_rows) output, returns the
+    // (slice index, offset within that slice) pair that rows_in_slice's slicing would place it in. The two must be
+    // changed together. Performance-critical: called once per random update write in merge, so this must stay
+    // branch-light, loop-free and header-inline.
+    std::pair<uint64_t, uint64_t> slice_and_offset_for_row(uint64_t global_row) const {
+        ARCTICDB_DEBUG_CHECK(
+                ErrorCode::E_ASSERTION_FAILURE,
+                global_row < total_rows,
+                "ReslicingInfo::slice_and_offset_for_row: row {} is out of bounds for {} total rows",
+                global_row,
+                total_rows
+        );
+        const uint64_t exact_rows = num_exact_segments * rows_per_segment;
+        if (global_row < exact_rows) {
+            return {global_row / rows_per_segment, global_row % rows_per_segment};
+        }
+        const uint64_t remainder_row = global_row - exact_rows;
+        return {num_exact_segments + remainder_row / (rows_per_segment + 1), remainder_row % (rows_per_segment + 1)};
     }
 
     uint64_t total_rows;

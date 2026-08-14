@@ -386,15 +386,68 @@ bool is_fake_index_name(const arcticc::pb2::descriptors_pb2::NormalizationMetada
 
 std::vector<SliceAndKey> merge_slices_and_keys(
         std::vector<SliceAndKey>&& old_slices, std::vector<SliceAndKey>&& new_slices,
-        ankerl::unordered_dense::map<RowRange, size_t>&& inserted_rows_per_row_range
+        ankerl::unordered_dense::map<RowRange, MergeUpdateInsertedRowsComponent>&& inserted_rows_per_row_range
 ) {
-    ranges::sort(new_slices);
+    // FrameSlice compares only (col_range.first, row_range.first) (frame_slice.hpp), and all output slices of one
+    // group deliberately share a single row_range (the group's consumed old range), so their relative order in
+    // new_slices is what determines their ascending output row order. Stability is therefore load-bearing here,
+    // unlike the old one-row-slice-per-group encoding.
+    ranges::stable_sort(new_slices);
     std::vector<SliceAndKey> merged_ranges_and_keys;
     auto new_slice_and_key_it = new_slices.begin();
     auto old_slice_and_key_it = old_slices.begin();
     while (old_slice_and_key_it != old_slices.end()) {
         size_t total_inserted_rows{};
         ColRange current_col_range = old_slice_and_key_it->slice().col_range;
+
+        // Emits the group of output row slices starting at *new_slice_and_key_it, advancing new_slice_and_key_it
+        // past all of them, and returns the row range they were recorded under. If there is no record for it (an
+        // appended ROWCOUNT-index slice from write_inserted_row_range_data, which never shares a row range with
+        // anything else) the fallback is a pure shift, mirroring how old slices are shifted; in that case
+        // std::nullopt is returned so callers do not attempt to skip old slices using a meaningless row range.
+        const auto emit_new_slice_group = [&]() -> std::optional<RowRange> {
+            const RowRange consumed = new_slice_and_key_it->slice().row_range;
+            const auto record_it = inserted_rows_per_row_range.find(consumed);
+            if (record_it == inserted_rows_per_row_range.end()) {
+                new_slice_and_key_it->slice().row_range.first += total_inserted_rows;
+                new_slice_and_key_it->slice().row_range.second += total_inserted_rows;
+                merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
+                ++new_slice_and_key_it;
+                return std::nullopt;
+            }
+            const MergeUpdateInsertedRowsComponent& record = record_it->second;
+            size_t out_row = consumed.first + total_inserted_rows;
+            size_t total_rows_emitted{};
+            for (const size_t rows : *record.output_row_counts) {
+                internal::check<ErrorCode::E_ASSERTION_FAILURE>(
+                        new_slice_and_key_it != new_slices.end() &&
+                                new_slice_and_key_it->slice().row_range == consumed &&
+                                new_slice_and_key_it->slice().col_range == current_col_range,
+                        "merge_slices_and_keys: recorded output layout does not match the new slices for consumed "
+                        "row range [{}, {})",
+                        consumed.first,
+                        consumed.second
+                );
+                new_slice_and_key_it->slice().row_range = RowRange{out_row, out_row + rows};
+                out_row += rows;
+                total_rows_emitted += rows;
+                merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
+                ++new_slice_and_key_it;
+            }
+            internal::check<ErrorCode::E_ASSERTION_FAILURE>(
+                    total_rows_emitted == consumed.diff() + record.inserted_rows,
+                    "merge_slices_and_keys: sum of output row counts {} does not equal consumed range {} rows plus "
+                    "{} inserted rows for consumed row range [{}, {})",
+                    total_rows_emitted,
+                    consumed.diff(),
+                    record.inserted_rows,
+                    consumed.first,
+                    consumed.second
+            );
+            total_inserted_rows += record.inserted_rows;
+            return consumed;
+        };
+
         while (old_slice_and_key_it != old_slices.end() && current_col_range == old_slice_and_key_it->slice().col_range
         ) {
             if (new_slice_and_key_it == new_slices.end() ||
@@ -403,27 +456,17 @@ std::vector<SliceAndKey> merge_slices_and_keys(
                 old_slice_and_key_it->slice().row_range.second += total_inserted_rows;
                 merged_ranges_and_keys.emplace_back(std::move(*old_slice_and_key_it));
                 ++old_slice_and_key_it;
-            } else {
-                const RowRange new_row_range = new_slice_and_key_it->slice().row_range;
-                const size_t inserted_rows = inserted_rows_per_row_range.at(new_row_range);
-                new_slice_and_key_it->slice().row_range.first += total_inserted_rows;
-                new_slice_and_key_it->slice().row_range.second += total_inserted_rows + inserted_rows;
-                total_inserted_rows += inserted_rows;
-                merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
-                ++new_slice_and_key_it;
+            } else if (const auto consumed = emit_new_slice_group(); consumed.has_value()) {
                 while (old_slice_and_key_it != old_slices.end() &&
                        old_slice_and_key_it->slice().col_range == current_col_range &&
-                       old_slice_and_key_it->slice().row_range.first < new_row_range.second) {
+                       old_slice_and_key_it->slice().row_range.first < consumed->second) {
                     ++old_slice_and_key_it;
                 }
             }
         }
         while (new_slice_and_key_it != new_slices.end() && new_slice_and_key_it->slice().col_range == current_col_range
         ) {
-            new_slice_and_key_it->slice().row_range.first += total_inserted_rows;
-            new_slice_and_key_it->slice().row_range.second += total_inserted_rows;
-            merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
-            ++new_slice_and_key_it;
+            emit_new_slice_group();
         }
     }
     internal::check<ErrorCode::E_ASSERTION_FAILURE>(
@@ -467,71 +510,92 @@ std::vector<StreamDescriptor> split_rowrange_descriptor(
 
 folly::SemiFuture<std::vector<SliceAndKey>> write_inserted_row_range_data(
         const InputFrame& source, const ComponentManager& component_manager, const StreamDescriptor& target_descriptor,
-        const size_t columns_per_slice, const IndexPartialKey& target_index_partial_key,
-        const size_t last_row_in_target, Store& store
+        const size_t columns_per_slice, const uint64_t max_rows_per_segment,
+        const IndexPartialKey& target_index_partial_key, const size_t last_row_in_target, Store& store
 ) {
     const std::optional<util::BitSet> source_rows_to_insert =
             source_rows_to_insert_for_row_range_merge_update(component_manager);
     const size_t num_rows_to_insert = source_rows_to_insert ? source_rows_to_insert->count() : 0;
+    // The early return above also guards ReslicingInfo below, which must never be constructed with 0 rows.
     if (num_rows_to_insert == 0) {
         return folly::makeFuture<std::vector<SliceAndKey>>(std::vector<SliceAndKey>{});
     }
+    // Materialise the set positions once, up front: driving each (column, output row slice) pair directly from the
+    // bitset would multiply today's one-traversal-per-column cost by the number of output row slices.
+    std::vector<size_t> positions;
+    positions.reserve(num_rows_to_insert);
+    iterate_over_set_positions(*source_rows_to_insert, [&](size_t source_row) { positions.push_back(source_row); });
+
     std::vector<StreamDescriptor> descriptors = split_rowrange_descriptor(target_descriptor, columns_per_slice);
-    const RowRange new_row_range{last_row_in_target, last_row_in_target + num_rows_to_insert};
-    auto write_data_keys_future = util::reserve_vector<folly::Future<SliceAndKey>>(descriptors.size());
+    const ReslicingInfo reslicing_info{num_rows_to_insert, max_rows_per_segment};
+    auto write_data_keys_future =
+            util::reserve_vector<folly::Future<SliceAndKey>>(descriptors.size() * reslicing_info.num_segments);
     for (size_t col_slice = 0; col_slice < descriptors.size(); ++col_slice) {
-        SegmentInMemory new_segment(
-                std::move(descriptors[col_slice]), num_rows_to_insert, AllocationType::PRESIZED, Sparsity::NOT_PERMITTED
-        );
-        const StreamDescriptor& slice_descriptor = new_segment.descriptor();
         const ColRange col_range{
                 col_slice * columns_per_slice,
                 std::min((col_slice + 1) * columns_per_slice, target_descriptor.field_count())
         };
-        for (size_t column_in_segment = 0; column_in_segment < slice_descriptor.field_count(); ++column_in_segment) {
-            std::optional<ScopedGILLock> gil_lock;
-            ColumnData col_data = new_segment.column_data(column_in_segment);
-            const Field& field = slice_descriptor.field(column_in_segment);
-            const size_t source_field_pos = col_range.start() + column_in_segment;
-            details::visit_scalar(field.type(), [&]<util::type_descriptor_tag TDT>(TDT) {
-                using SourceRawType = std::conditional_t<
-                        is_sequence_type(TDT::data_type()),
-                        PyObject* const,
-                        typename TDT::DataTypeTag::raw_type>;
-                auto data_it = col_data.begin<TDT>();
-                std::span<const SourceRawType> source_data = source.get_tensor(source_field_pos).span<SourceRawType>();
-                iterate_over_set_positions(*source_rows_to_insert, [&](size_t source_row) {
-                    if constexpr (is_sequence_type(TDT::data_type())) {
-                        *data_it = write_py_string_to_pool_or_throw<TDT>(
-                                source_data[source_row],
-                                source_row,
-                                RowRange{0, source.num_rows},
-                                gil_lock,
-                                new_segment.string_pool(),
-                                field.name()
-                        );
-                    } else {
-                        *data_it = source_data[source_row];
+        size_t prefix = 0;
+        for (size_t segment_idx = 0; segment_idx < reslicing_info.num_segments; ++segment_idx) {
+            const size_t rows_in_segment = reslicing_info.rows_in_slice(segment_idx);
+            // descriptors[col_slice] is shared by every output row slice of this column slice, so it must be
+            // copied here rather than moved.
+            SegmentInMemory new_segment(
+                    descriptors[col_slice], rows_in_segment, AllocationType::PRESIZED, Sparsity::NOT_PERMITTED
+            );
+            const StreamDescriptor& slice_descriptor = new_segment.descriptor();
+            for (size_t column_in_segment = 0; column_in_segment < slice_descriptor.field_count();
+                 ++column_in_segment) {
+                std::optional<ScopedGILLock> gil_lock;
+                ColumnData col_data = new_segment.column_data(column_in_segment);
+                const Field& field = slice_descriptor.field(column_in_segment);
+                const size_t source_field_pos = col_range.start() + column_in_segment;
+                details::visit_scalar(field.type(), [&]<util::type_descriptor_tag TDT>(TDT) {
+                    using SourceRawType = std::conditional_t<
+                            is_sequence_type(TDT::data_type()),
+                            PyObject* const,
+                            typename TDT::DataTypeTag::raw_type>;
+                    auto data_it = col_data.begin<TDT>();
+                    std::span<const SourceRawType> source_data =
+                            source.get_tensor(source_field_pos).span<SourceRawType>();
+                    for (size_t row = 0; row < rows_in_segment; ++row) {
+                        const size_t source_row = positions[prefix + row];
+                        if constexpr (is_sequence_type(TDT::data_type())) {
+                            *data_it = write_py_string_to_pool_or_throw<TDT>(
+                                    source_data[source_row],
+                                    source_row,
+                                    RowRange{0, source.num_rows},
+                                    gil_lock,
+                                    new_segment.string_pool(),
+                                    field.name()
+                            );
+                        } else {
+                            *data_it = source_data[source_row];
+                        }
+                        ++data_it;
                     }
-                    ++data_it;
                 });
-            });
+            }
+            new_segment.set_row_data(rows_in_segment - 1);
+            // These slices are appended after all existing rows and are never shifted, so their row ranges stay
+            // consistent regardless of how many output row slices this insertion is split into.
+            const RowRange new_row_range{last_row_in_target + prefix, last_row_in_target + prefix + rows_in_segment};
+            write_data_keys_future.push_back(store.compress_and_schedule_async_write(
+                    std::make_tuple(
+                            PartialKey{
+                                    .key_type = KeyType::TABLE_DATA,
+                                    .version_id = target_index_partial_key.version_id,
+                                    .stream_id = target_index_partial_key.id,
+                                    .start_index = static_cast<timestamp>(new_row_range.first),
+                                    .end_index = static_cast<timestamp>(new_row_range.second)
+                            },
+                            std::move(new_segment),
+                            FrameSlice(col_range, new_row_range)
+                    ),
+                    std::make_shared<DeDupMap>()
+            ));
+            prefix += rows_in_segment;
         }
-        new_segment.set_row_data(num_rows_to_insert - 1);
-        write_data_keys_future.push_back(store.compress_and_schedule_async_write(
-                std::make_tuple(
-                        PartialKey{
-                                .key_type = KeyType::TABLE_DATA,
-                                .version_id = target_index_partial_key.version_id,
-                                .stream_id = target_index_partial_key.id,
-                                .start_index = static_cast<timestamp>(new_row_range.first),
-                                .end_index = static_cast<timestamp>(new_row_range.second)
-                        },
-                        std::move(new_segment),
-                        FrameSlice(col_range, new_row_range)
-                ),
-                std::make_shared<DeDupMap>()
-        ));
     }
     return folly::collect(std::move(write_data_keys_future));
 }
@@ -3218,7 +3282,9 @@ folly::Future<AtomKey> merge_update_impl(
 ) {
     auto read_query = std::make_shared<ReadQuery>();
     const StreamDescriptor& source_descriptor = source->desc();
-    auto merge_update_clause = std::make_shared<Clause>(MergeUpdateClause(std::move(on), strategy, source));
+    auto merge_update_clause =
+            std::make_shared<Clause>(MergeUpdateClause(std::move(on), strategy, source, write_options.segment_row_size)
+            );
     read_query->clauses_.push_back(merge_update_clause);
     VersionIdentifier resolved = VersionedItem{*update_info.previous_index_key_};
     if (auto* vi = std::get_if<VersionedItem>(&resolved)) {
@@ -3296,6 +3362,7 @@ folly::Future<AtomKey> merge_update_impl(
                                           *component_manager,
                                           target_descriptor,
                                           write_options.column_group_size,
+                                          max_rows_per_segment_for(write_options.segment_row_size),
                                           target_partial_index_key,
                                           pipeline_context->last_row(),
                                           *store
@@ -3311,7 +3378,11 @@ folly::Future<AtomKey> merge_update_impl(
                                     target_partial_index_key,
                                     data_keys_and_slices = std::move(data_keys_and_slices
                                     )](std::vector<SliceAndKey>&& inserted_row_slices) mutable {
-                            ankerl::unordered_dense::map<RowRange, size_t> inserted_rows_per_row_range;
+                            // emplace's dedup is load-bearing in two dimensions here: across column slices of one
+                            // group (as before) and across a group's output row slices (new), since every entity
+                            // belonging to one group shares both its RowRange and its component value.
+                            ankerl::unordered_dense::map<RowRange, MergeUpdateInsertedRowsComponent>
+                                    inserted_rows_per_row_range;
                             component_manager->process_entities(
                                     [&](const MergeUpdateInsertedRowsComponent& inserted_rows,
                                         const std::shared_ptr<RowRange>& row_range) {
