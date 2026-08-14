@@ -399,17 +399,17 @@ std::vector<SliceAndKey> merge_slices_and_keys(
     while (old_slice_and_key_it != old_slices.end()) {
         size_t total_inserted_rows{};
         const ColRange current_col_range = old_slice_and_key_it->slice().col_range;
-        const auto old_slices_remain = [&] {
-            return old_slice_and_key_it != old_slices.end() &&
-                   old_slice_and_key_it->slice().col_range == current_col_range;
+        const auto old_column_slice_exhausted = [&] {
+            return old_slice_and_key_it == old_slices.end() ||
+                   old_slice_and_key_it->slice().col_range != current_col_range;
         };
-        const auto new_slices_remain = [&] {
-            return new_slice_and_key_it != new_slices.end() &&
-                   new_slice_and_key_it->slice().col_range == current_col_range;
+        const auto new_column_slice_exhausted = [&] {
+            return new_slice_and_key_it == new_slices.end() ||
+                   new_slice_and_key_it->slice().col_range != current_col_range;
         };
-        while (old_slices_remain() || new_slices_remain()) {
-            if (!new_slices_remain() ||
-                (old_slices_remain() && old_slice_and_key_it->slice() < new_slice_and_key_it->slice())) {
+        while (!old_column_slice_exhausted() || !new_column_slice_exhausted()) {
+            if (new_column_slice_exhausted() ||
+                (!old_column_slice_exhausted() && old_slice_and_key_it->slice() < new_slice_and_key_it->slice())) {
                 old_slice_and_key_it->slice().row_range.first += total_inserted_rows;
                 old_slice_and_key_it->slice().row_range.second += total_inserted_rows;
                 merged_ranges_and_keys.emplace_back(std::move(*old_slice_and_key_it));
@@ -430,7 +430,7 @@ std::vector<SliceAndKey> merge_slices_and_keys(
             size_t offset_in_group{};
             for (const MergeUpdateInsertedRowsComponent& slice_record : group) {
                 internal::check<ErrorCode::E_ASSERTION_FAILURE>(
-                        new_slices_remain() && new_slice_and_key_it->slice().row_range == consumed,
+                        !new_column_slice_exhausted() && new_slice_and_key_it->slice().row_range == consumed,
                         "merge_slices_and_keys: recorded output layout does not match the new slices for consumed "
                         "row range [{}, {})",
                         consumed.first,
@@ -454,7 +454,7 @@ std::vector<SliceAndKey> merge_slices_and_keys(
                     consumed.second
             );
             total_inserted_rows += group.front().inserted_rows;
-            while (old_slices_remain() && old_slice_and_key_it->slice().row_range.first < consumed.second) {
+            while (!old_column_slice_exhausted() && old_slice_and_key_it->slice().row_range.first < consumed.second) {
                 ++old_slice_and_key_it;
             }
         }
