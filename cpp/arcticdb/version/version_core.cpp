@@ -429,8 +429,11 @@ std::vector<SliceAndKey> merge_slices_and_keys(
             const size_t group_start = consumed.first + total_inserted_rows;
             size_t offset_in_group{};
             for (const MergeUpdateInsertedRowsComponent& slice_record : group) {
+                // A zero output_row_count means a position in the group was never assigned when the map was built:
+                // output row slices are never empty.
                 internal::check<ErrorCode::E_ASSERTION_FAILURE>(
-                        !new_column_slice_exhausted() && new_slice_and_key_it->slice().row_range == consumed,
+                        !new_column_slice_exhausted() && new_slice_and_key_it->slice().row_range == consumed &&
+                                slice_record.output_row_count > 0,
                         "merge_slices_and_keys: recorded output layout does not match the new slices for consumed "
                         "row range [{}, {})",
                         consumed.first,
@@ -443,17 +446,8 @@ std::vector<SliceAndKey> merge_slices_and_keys(
                 merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
                 ++new_slice_and_key_it;
             }
-            internal::check<ErrorCode::E_ASSERTION_FAILURE>(
-                    offset_in_group == consumed.diff() + group.front().inserted_rows,
-                    "merge_slices_and_keys: sum of output row counts {} does not equal consumed range {} rows plus "
-                    "{} inserted rows for consumed row range [{}, {})",
-                    offset_in_group,
-                    consumed.diff(),
-                    group.front().inserted_rows,
-                    consumed.first,
-                    consumed.second
-            );
-            total_inserted_rows += group.front().inserted_rows;
+            // The rows the group's output gained over the old range it consumed are the group's inserted rows.
+            total_inserted_rows += offset_in_group - consumed.diff();
             while (!old_column_slice_exhausted() && old_slice_and_key_it->slice().row_range.first < consumed.second) {
                 ++old_slice_and_key_it;
             }
@@ -3373,17 +3367,15 @@ folly::Future<AtomKey> merge_update_impl(
                             // overwrite each other with identical values.
                             ankerl::unordered_dense::map<RowRange, std::vector<MergeUpdateInsertedRowsComponent>>
                                     inserted_rows_per_row_range;
-                            component_manager->process_entities(
-                                    [&](const MergeUpdateInsertedRowsComponent& inserted_rows,
-                                        const std::shared_ptr<RowRange>& row_range) {
-                                        std::vector<MergeUpdateInsertedRowsComponent>& group =
-                                                inserted_rows_per_row_range[*row_range];
-                                        if (group.empty()) {
-                                            group.resize(inserted_rows.num_output_row_slices);
-                                        }
-                                        group[inserted_rows.output_row_slice_idx] = inserted_rows;
-                                    }
-                            );
+                            component_manager->process_entities([&](const MergeUpdateInsertedRowsComponent& component,
+                                                                    const std::shared_ptr<RowRange>& row_range) {
+                                std::vector<MergeUpdateInsertedRowsComponent>& group =
+                                        inserted_rows_per_row_range[*row_range];
+                                if (group.empty()) {
+                                    group.resize(component.num_output_row_slices);
+                                }
+                                group[component.output_row_slice_idx] = component;
+                            });
                             data_keys_and_slices.insert(
                                     data_keys_and_slices.end(),
                                     std::make_move_iterator(inserted_row_slices.begin()),

@@ -34,15 +34,14 @@ using namespace entt::literals;
 /// will iterate over them as well, producing wrong results. See merge_update_impl and Monday 12618296803
 ///
 /// Each entity carries its own output row slice's row count and position within its group, where a group is keyed
-/// by the RowRange shared by all of its entities (the group's consumed old row range) and its output spans
-/// consumed_row_range.diff() + inserted_rows rows. Entities of the same output row slice in different column slices
-/// carry identical values. The components of a group are collected by iterating the entt registry, whose order is
-/// unspecified, so each component records its own position and merge_update_impl places it at output_row_slice_idx
-/// when building the map merge_slices_and_keys reads the group layout from. No user-declared constructors: kept as
-/// an aggregate so it can be built with designated initializers at each call site.
+/// by the RowRange shared by all of its entities (the group's consumed old row range). merge_slices_and_keys
+/// derives the group's inserted rows as the sum of its output_row_count values minus the consumed range's row
+/// count. Entities of the same output row slice in different column slices carry identical values. The components
+/// of a group are collected by iterating the entt registry, whose order is unspecified, so each component records
+/// its own position and merge_update_impl places it at output_row_slice_idx when building the map
+/// merge_slices_and_keys reads the group layout from. No user-declared constructors: kept as an aggregate so it can
+/// be built with designated initializers at each call site.
 struct MergeUpdateInsertedRowsComponent {
-    /// Total number of source rows inserted by this entity's whole group.
-    size_t inserted_rows = 0;
     /// Number of rows in this entity's output row slice.
     size_t output_row_count = 0;
     /// Position of this entity's output row slice within the group, in ascending row order.

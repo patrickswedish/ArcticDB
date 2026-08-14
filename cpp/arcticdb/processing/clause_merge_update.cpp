@@ -971,7 +971,6 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
     for (auto&& [j, row_slice] : folly::enumerate(new_row_slices)) {
         const size_t entity_count = row_slice.segments_->size();
         const MergeUpdateInsertedRowsComponent component{
-                .inserted_rows = matched.total_unmatched_source_rows(),
                 .output_row_count = output_row_counts[j],
                 .output_row_slice_idx = j,
                 .num_output_row_slices = new_row_slices.size()
