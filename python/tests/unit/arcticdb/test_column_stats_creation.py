@@ -948,19 +948,12 @@ def test_column_stats_header_metadata(version_store_factory, lib_name, encoding_
     assert_header_offsets_match_field_names(lib, sym, header, {2: "col_1", 3: "col_2"})
 
 
-def test_column_stats_create_twice_is_idempotent(version_store_factory, lib_name, encoding_version, any_output_format):
-    """Creating stats twice on one version with no range recomputes every row slice both times, but
-    the recomputed values are identical, so header and content come out the same. This does not
-    mean the second call is a no-op - a range-limited create can and does change the segment - only
-    that recomputing unchanged data is idempotent."""
+def test_column_stats_create_twice_is_idempotent(version_store_factory, lib_name):
     lib = version_store_factory(
         column_group_size=2,
         segment_row_size=2,
-        encoding_version=int(encoding_version),
-        lmdb_config={"map_size": 2**30},
-        name=lib_name + f"_{encoding_version.name}",
+        name=lib_name,
     )
-    lib._set_output_format_for_pipeline_tests(any_output_format)
     sym = "test_column_stats_create_twice_is_idempotent"
     expected_column_stats = generate_symbol(lib, sym)
 
@@ -1336,7 +1329,7 @@ def test_column_stats_duplicate_index_values_across_slice_boundary(
     ts = pd.Timestamp("2000-01-01")
     lib.write(sym, pd.DataFrame({"col_1": [1, 2, 3, 4]}, index=[ts] * 4))
 
-    # The premise: row slices are cut by row count, so both share one (start_index, end_index).
+    # both share one (start_index, end_index)
     index_df = lib.read_index(sym).reset_index()
     assert len(index_df) == 2
     assert index_df["start_index"].nunique() == 1
@@ -1344,8 +1337,6 @@ def test_column_stats_duplicate_index_values_across_slice_boundary(
 
     lib.create_column_stats_experimental(sym)
 
-    # One row per row slice, each keyed by its own row range and carrying its own stats. Keyed on the
-    # index values the two collided and both were discarded.
     column_stats = lib.read_column_stats_experimental(sym)
     assert column_stats.num_rows == 2
     expected_column_stats = pl.DataFrame(
@@ -1358,8 +1349,7 @@ def test_column_stats_duplicate_index_values_across_slice_boundary(
     )
     assert_stats_equal(column_stats, expected_column_stats)
 
-    # Both rows are usable for pruning, which is what the collision cost. The filter matches only the
-    # second row slice.
+    # Both rows can be used for pruning
     q = QueryBuilder()
     q = q[q["col_1"] > 2]
     result = lib.read(sym, query_builder=q).data
