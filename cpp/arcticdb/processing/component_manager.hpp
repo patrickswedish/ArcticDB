@@ -33,16 +33,22 @@ using namespace entt::literals;
 /// accounting for insertion. If any other piece of code adds this entity to the component manager the merge updates
 /// will iterate over them as well, producing wrong results. See merge_update_impl and Monday 12618296803
 ///
-/// Carries the group's output row-slice layout so that merge_slices_and_keys can split a group's merged output into
-/// several output row slices while still recognising them as one group. Invariant:
-/// sum(*output_row_counts) == consumed_row_range.diff() + inserted_rows, where consumed_row_range is the RowRange
-/// key this component is stored under in merge_slices_and_keys's map. Every entity created for one processing group
-/// carries an identical component value. No user-declared constructors: kept as an aggregate so it can be built with
-/// designated initializers at each call site.
+/// Each entity carries its own output row slice's row count and position within its group, where a group is keyed
+/// by the RowRange shared by all of its entities (the group's consumed old row range) and its output spans
+/// consumed_row_range.diff() + inserted_rows rows. Entities of the same output row slice in different column slices
+/// carry identical values. The components of a group are collected by iterating the entt registry, whose order is
+/// unspecified, so each component records its own position and merge_update_impl places it at output_row_slice_idx
+/// when building the map merge_slices_and_keys reads the group layout from. No user-declared constructors: kept as
+/// an aggregate so it can be built with designated initializers at each call site.
 struct MergeUpdateInsertedRowsComponent {
+    /// Total number of source rows inserted by this entity's whole group.
     size_t inserted_rows = 0;
-    /// One entry per output row slice belonging to this group, in ascending row order.
-    std::shared_ptr<const std::vector<size_t>> output_row_counts;
+    /// Number of rows in this entity's output row slice.
+    size_t output_row_count = 0;
+    /// Position of this entity's output row slice within the group, in ascending row order.
+    size_t output_row_slice_idx = 0;
+    /// Number of output row slices emitted by the group.
+    size_t num_output_row_slices = 1;
 };
 
 /// Used only by the MergeUpdateClause, and only for row-count indexed targets. After the pipeline finishes,

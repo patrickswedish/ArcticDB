@@ -921,10 +921,11 @@ struct MergeUpdateClause {
     };
 
   private:
-    /// Returns the group's output row slices (empty if there was nothing to insert and the group was left
-    /// untouched) alongside the group's output row counts, one entry per output row slice in ascending row order,
-    /// needed by process() to populate MergeUpdateInsertedRowsComponent::output_row_counts.
-    std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>>> update_and_insert(
+    /// Returns the group's output row slices in ascending row order, each one a full row slice holding all its
+    /// column slices (empty if there was nothing to insert and the group was left untouched), alongside the group's
+    /// output row counts, one entry per returned row slice, needed by process() to build each entity's
+    /// MergeUpdateInsertedRowsComponent.
+    std::pair<std::vector<ProcessingUnit>, std::vector<size_t>> update_and_insert(
             const MatchRecord& match_record, const StreamDescriptor& target_descriptor,
             std::vector<ProcessingUnit>&& row_slices, std::pair<size_t, size_t> source_start_end
     ) const;

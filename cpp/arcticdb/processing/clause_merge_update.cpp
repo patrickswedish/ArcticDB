@@ -10,6 +10,7 @@
 #include <arcticdb/processing/processing_unit.hpp>
 #include <arcticdb/column_store/column_reslicer.hpp>
 #include <arcticdb/column_store/string_pool.hpp>
+#include <arcticdb/util/collection_utils.hpp>
 #include <arcticdb/util/offset_string.hpp>
 #include <arcticdb/pipeline/frame_slice.hpp>
 #include <arcticdb/pipeline/frame_utils.hpp>
@@ -18,6 +19,7 @@
 #include <arcticdb/stream/index.hpp>
 #include <ankerl/unordered_dense.h>
 #include <boost/regex.hpp>
+#include <folly/container/Enumerate.h>
 
 #include <ranges>
 
@@ -267,8 +269,7 @@ struct InsertTargetData {
 };
 
 /// Computes, per target row slice, the number of output rows contributed by all earlier target row slices in the
-/// same group. Moved out of merge and computed once per group by the caller, since it does not depend on which
-/// column is being merged.
+/// same group. Computed once per group by the caller, since it does not depend on which column is being merged.
 std::vector<size_t> compute_target_slice_offset(std::span<const ColumnWithStrings> target_indexes) {
     std::vector<size_t> result;
     std::transform_exclusive_scan(
@@ -913,18 +914,14 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
         std::vector<EntityId> res;
         for (ProcessingUnit& row_slice : new_row_slices) {
             const size_t entity_count = row_slice.segments_->size();
-            // update() does not resize its row slices, so each one is its own group of one output row slice.
-            const std::vector<size_t> single_row_count{row_slice.segments_->front()->row_count()};
-            auto output_row_counts = std::make_shared<const std::vector<size_t>>(single_row_count);
+            // update() keeps each row slice's row count and inserts nothing, so these entities carry no
+            // MergeUpdateInsertedRowsComponent: merge_slices_and_keys replaces the old slice with the same row
+            // range through its record-less path.
             std::vector<EntityId> entts = component_manager_->add_entities(
                     std::move(*row_slice.segments_),
                     std::move(*row_slice.row_ranges_),
                     std::move(*row_slice.col_ranges_),
-                    std::vector<EntityFetchCount>(entity_count, 1),
-                    std::vector(
-                            entity_count,
-                            MergeUpdateInsertedRowsComponent{.inserted_rows = 0, .output_row_counts = output_row_counts}
-                    )
+                    std::vector<EntityFetchCount>(entity_count, 1)
             );
             res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
         }
@@ -946,19 +943,13 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
             std::vector<EntityId> res;
             for (ProcessingUnit& row_slice : new_row_slices) {
                 const size_t entity_count = row_slice.segments_->size();
-                const std::vector<size_t> single_row_count{row_slice.segments_->front()->row_count()};
-                auto output_row_counts = std::make_shared<const std::vector<size_t>>(single_row_count);
+                // Update keeps the row count and inserted source rows land in separate appended slices, so these
+                // entities carry no MergeUpdateInsertedRowsComponent, same as the update-only path above.
                 std::vector<EntityId> entts = component_manager_->add_entities(
                         std::move(*row_slice.segments_),
                         std::move(*row_slice.row_ranges_),
                         std::move(*row_slice.col_ranges_),
                         std::vector<EntityFetchCount>(entity_count, 1),
-                        std::vector(
-                                entity_count,
-                                MergeUpdateInsertedRowsComponent{
-                                        .inserted_rows = 0, .output_row_counts = output_row_counts
-                                }
-                        ),
                         std::vector(entity_count, unmatched_source_rows_component)
                 );
                 res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
@@ -977,20 +968,20 @@ std::vector<EntityId> MergeUpdateClause::process(std::vector<EntityId>&& entity_
             update_and_insert(matched, target_descriptor, std::move(row_slices), source_start_end);
 
     std::vector<EntityId> res;
-    for (auto& row_slice : new_row_slices) {
+    for (auto&& [j, row_slice] : folly::enumerate(new_row_slices)) {
         const size_t entity_count = row_slice.segments_->size();
+        const MergeUpdateInsertedRowsComponent component{
+                .inserted_rows = matched.total_unmatched_source_rows(),
+                .output_row_count = output_row_counts[j],
+                .output_row_slice_idx = j,
+                .num_output_row_slices = new_row_slices.size()
+        };
         std::vector<EntityId> entts = component_manager_->add_entities(
                 std::move(*row_slice.segments_),
                 std::move(*row_slice.row_ranges_),
                 std::move(*row_slice.col_ranges_),
                 std::vector<EntityFetchCount>(entity_count, 1),
-                std::vector(
-                        entity_count,
-                        MergeUpdateInsertedRowsComponent{
-                                .inserted_rows = matched.total_unmatched_source_rows(),
-                                .output_row_counts = output_row_counts
-                        }
-                )
+                std::vector(entity_count, component)
         );
         res.insert(res.end(), std::make_move_iterator(entts.begin()), std::make_move_iterator(entts.end()));
     }
@@ -1117,7 +1108,7 @@ std::pair<size_t, size_t> MergeUpdateClause::get_source_start_end(std::span<cons
     }
 }
 
-std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>>> MergeUpdateClause::update_and_insert(
+std::pair<std::vector<ProcessingUnit>, std::vector<size_t>> MergeUpdateClause::update_and_insert(
         const MatchRecord& match_record, const StreamDescriptor& target_descriptor,
         std::vector<ProcessingUnit>&& row_slices, std::pair<size_t, size_t> source_start_end
 ) const {
@@ -1160,10 +1151,9 @@ std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>
     const TargetRange target_range = get_target_start_end(row_slices);
     const std::vector<size_t> target_slice_offset = compute_target_slice_offset(target_index_datas);
 
-    // The output total, hoisted here rather than recomputed once per merge() call as before: it does not depend on
-    // which column is being merged, only on the target row slices' row counts (any column's row count would do; the
-    // index is used here since target_index_datas is already built), the target range and the number of unmatched
-    // source rows.
+    // The output total does not depend on which column is being merged, only on the target row slices' row counts
+    // (any column's row count would do; the index is used here since target_index_datas is already built), the
+    // target range and the number of unmatched source rows. Computed once per group here rather than per column.
     const size_t num_rows_out_of_target_range =
             target_range.start_row_in_first_row_slice +
             (target_index_datas.back().column_->row_count() - target_range.end_row_in_last_row_slice);
@@ -1304,30 +1294,29 @@ std::pair<std::vector<ProcessingUnit>, std::shared_ptr<const std::vector<size_t>
             row_slices.front().row_ranges_->front()->first + target_range.start_row_in_first_row_slice,
             row_slices.back().row_ranges_->back()->first + target_range.end_row_in_last_row_slice
     );
-    ProcessingUnit result{};
-    result.segments_.emplace();
-    result.row_ranges_.emplace();
-    result.col_ranges_.emplace();
-    const size_t total_entities = num_col_slices * reslicing_info.num_segments;
-    result.segments_->reserve(total_entities);
-    result.row_ranges_->reserve(total_entities);
-    result.col_ranges_->reserve(total_entities);
-    for (size_t c = 0; c < num_col_slices; ++c) {
-        const auto& col_range = (*row_slices.front().col_ranges_)[c];
-        for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
-            result.segments_->emplace_back(std::make_shared<SegmentInMemory>(std::move(segments[c][j])));
-            result.row_ranges_->emplace_back(new_row_range);
-            result.col_ranges_->emplace_back(col_range);
-        }
-    }
-
-    auto output_row_counts = std::make_shared<std::vector<size_t>>();
-    output_row_counts->reserve(reslicing_info.num_segments);
+    auto result = util::reserve_vector<ProcessingUnit>(reslicing_info.num_segments);
     for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
-        output_row_counts->push_back(reslicing_info.rows_in_slice(j));
+        ProcessingUnit unit{};
+        unit.segments_.emplace();
+        unit.row_ranges_.emplace();
+        unit.col_ranges_.emplace();
+        unit.segments_->reserve(num_col_slices);
+        unit.row_ranges_->reserve(num_col_slices);
+        unit.col_ranges_->reserve(num_col_slices);
+        for (size_t c = 0; c < num_col_slices; ++c) {
+            unit.segments_->emplace_back(std::make_shared<SegmentInMemory>(std::move(segments[c][j])));
+            unit.row_ranges_->emplace_back(new_row_range);
+            unit.col_ranges_->emplace_back((*row_slices.front().col_ranges_)[c]);
+        }
+        result.push_back(std::move(unit));
     }
 
-    return {std::vector{std::move(result)}, std::move(output_row_counts)};
+    auto output_row_counts = util::reserve_vector<size_t>(reslicing_info.num_segments);
+    for (size_t j = 0; j < reslicing_info.num_segments; ++j) {
+        output_row_counts.push_back(reslicing_info.rows_in_slice(j));
+    }
+
+    return {std::move(result), std::move(output_row_counts)};
 }
 
 std::vector<ProcessingUnit> MergeUpdateClause::update(

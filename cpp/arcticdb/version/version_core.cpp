@@ -386,87 +386,77 @@ bool is_fake_index_name(const arcticc::pb2::descriptors_pb2::NormalizationMetada
 
 std::vector<SliceAndKey> merge_slices_and_keys(
         std::vector<SliceAndKey>&& old_slices, std::vector<SliceAndKey>&& new_slices,
-        ankerl::unordered_dense::map<RowRange, MergeUpdateInsertedRowsComponent>&& inserted_rows_per_row_range
+        ankerl::unordered_dense::map<RowRange, std::vector<MergeUpdateInsertedRowsComponent>>&&
+                inserted_rows_per_row_range
 ) {
     // FrameSlice compares only (col_range.first, row_range.first) (frame_slice.hpp), and all output slices of one
     // group deliberately share a single row_range (the group's consumed old range), so their relative order in
-    // new_slices is what determines their ascending output row order. Stability is therefore load-bearing here,
-    // unlike the old one-row-slice-per-group encoding.
+    // new_slices is what determines their ascending output row order. Stability is therefore load-bearing here.
     ranges::stable_sort(new_slices);
     std::vector<SliceAndKey> merged_ranges_and_keys;
     auto new_slice_and_key_it = new_slices.begin();
     auto old_slice_and_key_it = old_slices.begin();
     while (old_slice_and_key_it != old_slices.end()) {
         size_t total_inserted_rows{};
-        ColRange current_col_range = old_slice_and_key_it->slice().col_range;
-
-        // Emits the group of output row slices starting at *new_slice_and_key_it, advancing new_slice_and_key_it
-        // past all of them, and returns the row range they were recorded under. If there is no record for it (an
-        // appended ROWCOUNT-index slice from write_inserted_row_range_data, which never shares a row range with
-        // anything else) the fallback is a pure shift, mirroring how old slices are shifted; in that case
-        // std::nullopt is returned so callers do not attempt to skip old slices using a meaningless row range.
-        const auto emit_new_slice_group = [&]() -> std::optional<RowRange> {
+        const ColRange current_col_range = old_slice_and_key_it->slice().col_range;
+        const auto old_slices_remain = [&] {
+            return old_slice_and_key_it != old_slices.end() &&
+                   old_slice_and_key_it->slice().col_range == current_col_range;
+        };
+        const auto new_slices_remain = [&] {
+            return new_slice_and_key_it != new_slices.end() &&
+                   new_slice_and_key_it->slice().col_range == current_col_range;
+        };
+        while (old_slices_remain() || new_slices_remain()) {
+            if (!new_slices_remain() ||
+                (old_slices_remain() && old_slice_and_key_it->slice() < new_slice_and_key_it->slice())) {
+                old_slice_and_key_it->slice().row_range.first += total_inserted_rows;
+                old_slice_and_key_it->slice().row_range.second += total_inserted_rows;
+                merged_ranges_and_keys.emplace_back(std::move(*old_slice_and_key_it));
+                ++old_slice_and_key_it;
+                continue;
+            }
+            // Emit the group of output row slices sharing the consumed row range, then skip the old slices they
+            // replace. Slices without a record (update-only output and appended ROWCOUNT-index slices) form a
+            // group of one output row slice with nothing inserted, which reduces to a pure shift. Each recorded
+            // component was placed at its own output_row_slice_idx, so a recorded group is in ascending row order
+            // whatever entt iteration order it was collected in.
             const RowRange consumed = new_slice_and_key_it->slice().row_range;
             const auto record_it = inserted_rows_per_row_range.find(consumed);
-            if (record_it == inserted_rows_per_row_range.end()) {
-                new_slice_and_key_it->slice().row_range.first += total_inserted_rows;
-                new_slice_and_key_it->slice().row_range.second += total_inserted_rows;
-                merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
-                ++new_slice_and_key_it;
-                return std::nullopt;
-            }
-            const MergeUpdateInsertedRowsComponent& record = record_it->second;
-            size_t out_row = consumed.first + total_inserted_rows;
-            size_t total_rows_emitted{};
-            for (const size_t rows : *record.output_row_counts) {
+            const std::vector<MergeUpdateInsertedRowsComponent> unrecorded{{.output_row_count = consumed.diff()}};
+            const std::vector<MergeUpdateInsertedRowsComponent>& group =
+                    record_it == inserted_rows_per_row_range.end() ? unrecorded : record_it->second;
+            const size_t group_start = consumed.first + total_inserted_rows;
+            size_t offset_in_group{};
+            for (const MergeUpdateInsertedRowsComponent& slice_record : group) {
                 internal::check<ErrorCode::E_ASSERTION_FAILURE>(
-                        new_slice_and_key_it != new_slices.end() &&
-                                new_slice_and_key_it->slice().row_range == consumed &&
-                                new_slice_and_key_it->slice().col_range == current_col_range,
+                        new_slices_remain() && new_slice_and_key_it->slice().row_range == consumed,
                         "merge_slices_and_keys: recorded output layout does not match the new slices for consumed "
                         "row range [{}, {})",
                         consumed.first,
                         consumed.second
                 );
-                new_slice_and_key_it->slice().row_range = RowRange{out_row, out_row + rows};
-                out_row += rows;
-                total_rows_emitted += rows;
+                new_slice_and_key_it->slice().row_range = RowRange{
+                        group_start + offset_in_group, group_start + offset_in_group + slice_record.output_row_count
+                };
+                offset_in_group += slice_record.output_row_count;
                 merged_ranges_and_keys.emplace_back(std::move(*new_slice_and_key_it));
                 ++new_slice_and_key_it;
             }
             internal::check<ErrorCode::E_ASSERTION_FAILURE>(
-                    total_rows_emitted == consumed.diff() + record.inserted_rows,
+                    offset_in_group == consumed.diff() + group.front().inserted_rows,
                     "merge_slices_and_keys: sum of output row counts {} does not equal consumed range {} rows plus "
                     "{} inserted rows for consumed row range [{}, {})",
-                    total_rows_emitted,
+                    offset_in_group,
                     consumed.diff(),
-                    record.inserted_rows,
+                    group.front().inserted_rows,
                     consumed.first,
                     consumed.second
             );
-            total_inserted_rows += record.inserted_rows;
-            return consumed;
-        };
-
-        while (old_slice_and_key_it != old_slices.end() && current_col_range == old_slice_and_key_it->slice().col_range
-        ) {
-            if (new_slice_and_key_it == new_slices.end() ||
-                old_slice_and_key_it->slice() < new_slice_and_key_it->slice()) {
-                old_slice_and_key_it->slice().row_range.first += total_inserted_rows;
-                old_slice_and_key_it->slice().row_range.second += total_inserted_rows;
-                merged_ranges_and_keys.emplace_back(std::move(*old_slice_and_key_it));
+            total_inserted_rows += group.front().inserted_rows;
+            while (old_slices_remain() && old_slice_and_key_it->slice().row_range.first < consumed.second) {
                 ++old_slice_and_key_it;
-            } else if (const auto consumed = emit_new_slice_group(); consumed.has_value()) {
-                while (old_slice_and_key_it != old_slices.end() &&
-                       old_slice_and_key_it->slice().col_range == current_col_range &&
-                       old_slice_and_key_it->slice().row_range.first < consumed->second) {
-                    ++old_slice_and_key_it;
-                }
             }
-        }
-        while (new_slice_and_key_it != new_slices.end() && new_slice_and_key_it->slice().col_range == current_col_range
-        ) {
-            emit_new_slice_group();
         }
     }
     internal::check<ErrorCode::E_ASSERTION_FAILURE>(
@@ -3378,15 +3368,20 @@ folly::Future<AtomKey> merge_update_impl(
                                     target_partial_index_key,
                                     data_keys_and_slices = std::move(data_keys_and_slices
                                     )](std::vector<SliceAndKey>&& inserted_row_slices) mutable {
-                            // emplace's dedup is load-bearing in two dimensions here: across column slices of one
-                            // group (as before) and across a group's output row slices (new), since every entity
-                            // belonging to one group shares both its RowRange and its component value.
-                            ankerl::unordered_dense::map<RowRange, MergeUpdateInsertedRowsComponent>
+                            // Placement by output_row_slice_idx makes each group's layout independent of the entt
+                            // iteration order; entities of the same output row slice in different column slices
+                            // overwrite each other with identical values.
+                            ankerl::unordered_dense::map<RowRange, std::vector<MergeUpdateInsertedRowsComponent>>
                                     inserted_rows_per_row_range;
                             component_manager->process_entities(
                                     [&](const MergeUpdateInsertedRowsComponent& inserted_rows,
                                         const std::shared_ptr<RowRange>& row_range) {
-                                        inserted_rows_per_row_range.emplace(*row_range, inserted_rows);
+                                        std::vector<MergeUpdateInsertedRowsComponent>& group =
+                                                inserted_rows_per_row_range[*row_range];
+                                        if (group.empty()) {
+                                            group.resize(inserted_rows.num_output_row_slices);
+                                        }
+                                        group[inserted_rows.output_row_slice_idx] = inserted_rows;
                                     }
                             );
                             data_keys_and_slices.insert(

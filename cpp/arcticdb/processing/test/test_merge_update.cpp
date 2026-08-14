@@ -104,9 +104,11 @@ void sort_by_rowslice(std::span<RowRange> rows, std::span<ColRange> cols, Other&
 
 MergeUpdateClause create_clause(
         const MergeStrategy strategy, std::shared_ptr<ComponentManager> component_manager, InputFrame&& input_frame,
-        std::vector<std::string> on = {}
+        const uint64_t rows_per_segment, std::vector<std::string> on = {}
 ) {
-    MergeUpdateClause clause(std::move(on), strategy, std::make_shared<InputFrame>(std::move(input_frame)));
+    MergeUpdateClause clause(
+            std::move(on), strategy, std::make_shared<InputFrame>(std::move(input_frame)), rows_per_segment
+    );
     clause.set_component_manager(std::move(component_manager));
     return clause;
 }
@@ -179,8 +181,10 @@ struct MergeUpdateClauseUpdateStrategyTestBase {
         segments_ = std::move(segments);
     }
 
-    MergeUpdateClause create_clause(InputFrame&& input_frame, std::vector<std::string> on = {}) const {
-        return ::create_clause(strategy_, component_manager_, std::move(input_frame), std::move(on));
+    MergeUpdateClause create_clause(
+            InputFrame&& input_frame, const uint64_t rows_per_segment, std::vector<std::string> on = {}
+    ) const {
+        return ::create_clause(strategy_, component_manager_, std::move(input_frame), rows_per_segment, std::move(on));
     }
 
     std::vector<EntityId> push_entities(const std::span<const std::vector<size_t>> structure_indices) {
@@ -317,7 +321,7 @@ TEST_P(MergeUpdateClauseUpdateStrategyMatchAllSegTest, SourceIndexMatchesAllSegm
             std::array{11.1f, 22.2f, 33.3f},
             std::array<timestamp, 3>{1000, 2000, 3000}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     assert_structure_for_processing_creates_ordered_row_sliced_data_containing_all_segments(structure_indices);
     auto [expected_segments, expected_col_ranges, expected_row_ranges] = slice_data_into_segments<TimeseriesIndex>(
@@ -349,7 +353,7 @@ TEST_P(MergeUpdateClauseUpdateStrategyMatchAllSegTest, SourceHasValuesOutsideOfT
             std::array{-10.f, -11.f, 11.1f, 22.2f, 33.3f, -12.f, -14.f},
             std::array<timestamp, 7>{-11, -12, 1000, 2000, 3000, -13, -14}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     assert_structure_for_processing_creates_ordered_row_sliced_data_containing_all_segments(structure_indices);
     auto [expected_segments, expected_col_ranges, expected_row_ranges] = slice_data_into_segments<TimeseriesIndex>(
@@ -424,7 +428,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, NoMatch) {
             std::array{-10.f, -11.f, 11.1f, 22.2f},
             std::array<timestamp, 4>{-11, -12, 1000, 2000}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(structure_indices.size(), 0);
     ASSERT_EQ(ranges_and_keys_.size(), 0);
@@ -440,7 +444,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchFirst) {
             std::array{-11.f},
             std::array<timestamp, 1>{-12}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 2);
     ASSERT_EQ(structure_indices.size(), 1);
@@ -488,7 +492,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchSecond) {
             std::array{-11.f},
             std::array<timestamp, 1>{-12}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 2);
     ASSERT_EQ(structure_indices.size(), 1);
@@ -539,7 +543,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchThird) {
             std::array{-11.f},
             std::array<timestamp, 1>{-12}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 2);
     ASSERT_EQ(structure_indices.size(), 1);
@@ -588,7 +592,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchFirstAndThird) {
             std::array{-11.f, -12.f},
             std::array<timestamp, 2>{-12, -13}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 4);
     ASSERT_EQ(structure_indices.size(), 2);
@@ -663,7 +667,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchFirstAndSecond) {
             std::array{-11.f, -12.f},
             std::array<timestamp, 2>{-12, -13}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 4);
     ASSERT_EQ(structure_indices.size(), 2);
@@ -738,7 +742,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyMatchSubsetTest, MatchSecondAndThird) {
             std::array{-11.f, -12.f},
             std::array<timestamp, 2>{-12, -13}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     ASSERT_EQ(ranges_and_keys_.size(), 4);
     ASSERT_EQ(structure_indices.size(), 2);
@@ -851,7 +855,7 @@ TEST_F(MergeUpdateClauseOnParameterTest, OneOnColumn_IndexMatchesButColumnDiffer
             std::array{0.f},
             std::array{timestamp{0}}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     // The first row range is matched. It contains two column slices.
     const size_t row_slices_to_process = structure_indices.size();
@@ -882,7 +886,7 @@ TEST_F(MergeUpdateClauseOnParameterTest, OneOnColumn_BothIndexAndColumnMatch) {
             std::array{timestamp{999}}
     );
 
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
 
     const size_t row_slices_to_process = structure_indices.size();
@@ -932,7 +936,7 @@ TEST_F(MergeUpdateClauseOnParameterTest, TwoOnColumns_BothMatch) {
             std::array<timestamp, 3>{100, 101, 102}
     );
 
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8", "uint32"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8", "uint32"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 1);
@@ -985,7 +989,7 @@ TEST_F(MergeUpdateClauseOnParameterTest, OneOnColumn_SourceSpansBothRowSegments)
             std::array<timestamp, 3>{1000, 2000, 3000}
     );
 
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 2);
@@ -1103,7 +1107,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, RequireNonEmptyOn) {
             std::array{0.f},
             std::array{timestamp{0}}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame));
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1123,7 +1127,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, NonExistingOnThrows) {
             std::array{1000.f, 1001.f},
             std::array<timestamp, 2>{2000, 2001}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"nonexisting"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"nonexisting"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1144,7 +1148,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, MatchOneColumn_Segment1) {
             std::array{1000.f, 1001.f},
             std::array<timestamp, 2>{2000, 2001}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1216,7 +1220,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, MatchOneColumn_ValueInSourceMatc
             std::array{1000.f},
             std::array<timestamp, 1>{2000}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1307,7 +1311,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, MatchOneColumn_Segment1_Segment3
             std::array{1000.f, 1001.f},
             std::array<timestamp, 2>{2000, 2001}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1375,7 +1379,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, MatchNaN) {
             std::array{std::numeric_limits<float>::quiet_NaN()},
             std::array<timestamp, 1>{2000}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"float32"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"float32"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1431,7 +1435,7 @@ TEST_F(MergeUpdateClauseUpdateStrategyRowRange, MergeOnTwoColumns_Segment1_Segme
             std::array{1000.f, 1001.f},
             std::array<timestamp, 2>{2000, 2001}
     );
-    MergeUpdateClause clause = create_clause(std::move(input_frame), {"int8", "uint32"});
+    MergeUpdateClause clause = create_clause(std::move(input_frame), 100'000, {"int8", "uint32"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys_);
     const size_t row_slices_to_process = structure_indices.size();
     ASSERT_EQ(row_slices_to_process, 3);
@@ -1512,7 +1516,7 @@ TEST(IndexValueSpansMultipleSegments, SegmetStartsWithTheSameValueAsAnotherEnds)
     auto [input_frame, source_data] = input_frame_from_tensors<TimeseriesIndex>(
             desc, std::array<timestamp, 3>{1, 2, 3}, std::array{100, 200, 300}, std::array{100, 200, 300}
     );
-    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 2);
     std::vector<EntityId> entities = push_selected_entities(
@@ -1568,7 +1572,7 @@ TEST(IndexValueSpansMultipleSegments, MultipleSegmentsConsistedOfTheSameValue) {
         auto [input_frame, _] = input_frame_from_tensors<TimeseriesIndex>(
                 desc, std::array{source_index}, std::array{100}, std::array{200}
         );
-        MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame));
+        MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000);
         const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
         if (source_index != 2) {
             ASSERT_EQ(structure_indices.size(), 0);
@@ -1647,7 +1651,7 @@ TEST(MergeClauseDateRange, SourceMatchesAllIndexRangesButDoesNotMatchAnyRow) {
             std::array<timestamp, 3>{2000, 3000, 4000}
     );
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(update_only_strategy, component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(update_only_strategy, component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 3);
     std::vector<EntityId> entities = push_selected_entities(
@@ -1702,7 +1706,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, InsertBeforeFirstRow) {
             std::array<float, 3>{500.f, 600.f, 700.f},
             std::array<timestamp, 3>{111, 222, 333}
     );
-    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     // Inserting in the beginning of the DataFrame picks the first row slice
     ASSERT_EQ(structure_indices.size(), 1);
@@ -1773,7 +1777,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, InsertAfterLastRow) {
             std::array<float, 3>{500.f, 600.f, 700.f},
             std::array<timestamp, 3>{111, 222, 333}
     );
-    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame), 100'000);
 
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     // Inserting in the end picks the last row slice
@@ -1838,7 +1842,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, SourceDataEndsBeforeLastSegment) {
     );
     std::vector<RangesAndKey> ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 3);
     ASSERT_TRUE(std::ranges::all_of(structure_indices, [](const auto& indices) { return indices.size() == 1; }));
@@ -1909,7 +1913,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, SourceDataStartsAfterTheFirstSegment) {
     );
     std::vector<RangesAndKey> ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     constexpr static size_t expected_segments_to_process = 2;
     ASSERT_EQ(structure_indices.size(), expected_segments_to_process);
@@ -1977,7 +1981,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, SkipExpandedSegmentsInsertAtEnd) {
     );
     std::vector<RangesAndKey> ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     constexpr static size_t expected_segments_to_process = 2;
     ASSERT_EQ(structure_indices.size(), expected_segments_to_process);
@@ -2043,7 +2047,7 @@ TEST_P(MergeUpdateClauseInsertAndUpdate, SkipExpandedSegmentsInsertInMiddle) {
     std::vector<RangesAndKey> ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     ASSERT_EQ(ranges_and_keys.size(), num_row_slices);
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(GetParam(), component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     constexpr static size_t expected_segments_to_process = 1;
     ASSERT_EQ(structure_indices.size(), expected_segments_to_process);
@@ -2127,7 +2131,7 @@ TEST_P(MergeUpdateClauseUpdateOffByOne, UpdateOffByOne) {
     std::vector<RangesAndKey> ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     ASSERT_EQ(ranges_and_keys.size(), 12);
     auto component_manager = std::make_shared<ComponentManager>();
-    MergeUpdateClause clause = create_clause(strategy(), component_manager, std::move(input_frame));
+    MergeUpdateClause clause = create_clause(strategy(), component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     constexpr static size_t expected_segments_to_process = 1;
     ASSERT_EQ(structure_indices.size(), expected_segments_to_process);
@@ -2233,7 +2237,7 @@ TEST(MergeUpdateInsertIndexSpansMultipleSegments, LastIndexValueSameAsNextSegmen
     constexpr static MergeStrategy strategy{
             .matched = MergeAction::UPDATE, .not_matched_by_target = MergeAction::INSERT
     };
-    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), {"a"});
+    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 2);
     std::vector<EntityId> entities = push_selected_entities(
@@ -2356,7 +2360,7 @@ TEST(MergeUpdateInsertIndexSpansMultipleSegments, LastIndexValueSameAsNextSegmen
     constexpr static MergeStrategy strategy{
             .matched = MergeAction::UPDATE, .not_matched_by_target = MergeAction::INSERT
     };
-    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), {"a"});
+    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 2);
     std::vector<EntityId> entities = push_selected_entities(
@@ -2502,7 +2506,7 @@ TEST(MergeUpdateInsertIndexSpansMultipleSegments, TwoGroupsOfSegmentsWithMatchin
     constexpr static MergeStrategy strategy{
             .matched = MergeAction::UPDATE, .not_matched_by_target = MergeAction::INSERT
     };
-    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), {"a"});
+    MergeUpdateClause clause = create_clause(strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_EQ(structure_indices.size(), 4);
 
@@ -2753,7 +2757,7 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain, SourceInRowSlice0) {
             desc, std::array<timestamp, 2>{0, 2}, std::array<int64_t, 2>{0, 10}, std::array{100, 200}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1}}));
     ASSERT_TRUE(std::ranges::equal(
@@ -2801,7 +2805,7 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain, SourceInRowSlice1ValueI
             desc, std::array{timestamp{5}}, std::array{int64_t{4}}, std::array{100}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1, 2, 3, 4, 5}}));
     ASSERT_TRUE(std::ranges::equal(
@@ -2848,7 +2852,7 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain, SourceInRowSlice1ValueI
             std::array{100, 200, 300, 400}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(
             std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1, 2, 3, 4, 5}, {4, 5, 6, 7}})
@@ -2936,7 +2940,7 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain, SourceInRowSlice3) {
             desc, std::array{timestamp{11}}, std::array{int64_t{100}}, std::array{100}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(
             structure_indices, std::vector<std::vector<size_t>>{{0, 1, 2, 3, 4, 5}, {4, 5, 6, 7}, {6, 7, 8, 9}}
@@ -3041,7 +3045,7 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain, SourceInRowSlice5) {
             desc, std::array{timestamp{15}}, std::array{int64_t{100}}, std::array{100}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(
             structure_indices, std::vector<std::vector<size_t>>{{0, 1, 2, 3}, {2, 3, 4, 5}, {4, 5, 6, 7}}
@@ -3141,7 +3145,8 @@ TEST_F(MergeUpdateInsertIndexSpansMultipleSegmentsChain,
     auto [input_frame, input_frame_owner] = input_frame_from_tensors<TimeseriesIndex>(
             desc, std::array{timestamp{7}}, std::array{int64_t{100}}, std::array{100}
     );
-    MergeUpdateClause clause = create_clause(update_and_insert_strategy, component_manager, std::move(input_frame));
+    MergeUpdateClause clause =
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000);
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1}}));
     ASSERT_TRUE(std::ranges::equal(
@@ -3195,7 +3200,7 @@ TEST(MergeUpdateInsertBackSharedGroup, InsertsIntoBackSharedMiddleGroup) {
             desc, std::array<timestamp, 3>{15, 25, 35}, std::array<int64_t, 3>{1000, 1001, 1002}
     );
     MergeUpdateClause clause =
-            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), {"a"});
+            create_clause(update_and_insert_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1}, {1, 2}, {2, 3}}));
     const std::vector<EntityId> entities = push_selected_entities(
@@ -3274,7 +3279,8 @@ TEST(MergeUpdateInsertOnlySharedSlice, InsertsIntoChainWithSharedBoundaries) {
     auto ranges_and_keys = generate_ranges_and_keys(desc, segments, col_ranges, row_ranges);
     auto [input_frame, input_frame_owner] =
             input_frame_from_tensors<TimeseriesIndex>(desc, std::array<timestamp, 1>{25}, std::array<int64_t, 1>{1000});
-    MergeUpdateClause clause = create_clause(insert_only_strategy, component_manager, std::move(input_frame), {"a"});
+    MergeUpdateClause clause =
+            create_clause(insert_only_strategy, component_manager, std::move(input_frame), 100'000, {"a"});
     const std::vector<std::vector<size_t>> structure_indices = clause.structure_for_processing(ranges_and_keys);
     ASSERT_TRUE(std::ranges::equal(structure_indices, std::vector<std::vector<size_t>>{{0, 1}, {1, 2}}));
     const std::vector<EntityId> entities = push_selected_entities(
