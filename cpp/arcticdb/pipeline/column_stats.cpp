@@ -210,7 +210,8 @@ std::vector<ColumnStatsRow> decode_column_stats_segment(const SegmentInMemory& s
         for (const auto& entry : entry_list.entries()) {
             internal::check<ErrorCode::E_ASSERTION_FAILURE>(
                     entry.type() != ColumnStatTypeInternal::UNKNOWN,
-                    "Column stats header entry for data column {} has an unrecognised stat type - you need to upgrade your ArcticDB client",
+                    "Column stats header entry for data column {} has an unrecognised stat type - you need to upgrade "
+                    "your ArcticDB client",
                     data_col_offset
             );
             const auto stats_seg_offset = entry.stats_seg_offset();
